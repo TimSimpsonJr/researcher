@@ -10,7 +10,7 @@ You are the orchestrator. You run a stateful multi-stage research pipeline that 
 ## Bootstrap Constants
 
 - `REPO` = the plugin root. When this skill loads, Claude Code prints its base directory (ending in `skills/researcher`); `REPO` is the directory two levels above it. Write that absolute path wherever `REPO` appears below, inside the quotes.
-- `VAULT`, `SCRIPTS`, `STATE_DIR`, `CASES_DIR` = the `vault`, `scripts`, `state_dir` and `cases_dir` values printed by `rw.py locate` (Stage 0, Pre-flight).
+- `VAULT` and `STATE_DIR` = the `vault` and `state_dir` values printed by `rw.py locate` (Stage 0, Pre-flight).
 
 ## Running Python
 
@@ -46,7 +46,7 @@ Then locate the vault. Run via Bash:
 ```bash
 uv run --frozen --project "REPO" "REPO/scripts/rw.py" locate
 ```
-Store `VAULT`, `SCRIPTS`, `STATE_DIR` and `CASES_DIR` from the printed JSON. If it exits non-zero, show its message and stop: the user needs to run `/researcher-setup` or start Claude Code inside the vault.
+Store `VAULT` and `STATE_DIR` from the printed JSON. If it exits non-zero, show its message and stop: the user needs to run `/researcher-setup` or start Claude Code inside the vault.
 
 ### 0a. Load config
 
@@ -1197,7 +1197,7 @@ new cases going forward. Existing case history at
 
 If `promotion_candidates` is non-empty AND no `learned_patterns_*` or `accumulator_*` warnings, proceed to Stage 10e. Otherwise skip 10e.
 
-If the analyzer fails entirely (script exits non-zero or LockTimeoutError raised), log to state telemetry and continue silently. The run still completes; the analyzer just didn't update state this round.
+If the analyzer fails entirely (script exits non-zero), log to state telemetry and continue silently. The run still completes; the analyzer just didn't update state this round.
 
 ### 10e. Graduation prompt (v3.1.0, conditional on Stage 10d output)
 
