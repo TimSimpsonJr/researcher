@@ -350,3 +350,106 @@ def test_abandon_run_without_run(vault, cli):
 def test_state_command_without_run_fails(vault, cli):
     code, _, err = cli("set-strategy", "--strategy", "unified")
     assert code == 1 and "no active run" in err
+
+
+def test_update_stage_completed_or_current_requires_total(active_run, cli):
+    for extra in (["--completed", "2"], ["--current", "Alpha"]):
+        code, _, err = cli("update-stage", "--stage", "write", *extra)
+        assert code == 1 and "--total" in err
+
+
+# --- hop loop ---------------------------------------------------------------
+
+from learned_patterns import LearnedPattern, LearnedPatternsFile, save_learned_patterns
+
+
+def _seed_learned(vault):
+    save_learned_patterns(
+        vault / ".researcher" / "learned_patterns.md",
+        LearnedPatternsFile(patterns=[
+            LearnedPattern(id="p-search", name="T1 first", body="Prefer agency data",
+                           domain_tags=["alpr"], target_stage="search"),
+            LearnedPattern(id="p-hop", name="Follow money", body="Trace contracts",
+                           domain_tags=["flock"], target_stage="hop_planner"),
+            LearnedPattern(id="p-other", name="Unrelated", body="x",
+                           domain_tags=["zoning"], target_stage="classify"),
+        ]),
+    )
+
+
+def test_learned_patterns_groups_ids_by_stage(active_run, cli):
+    _seed_learned(active_run)
+    code, out, _ = cli("learned-patterns")
+    assert code == 0
+    assert out == {"search": ["p-search"], "hop_planner": ["p-hop"], "classify": []}
+
+
+def test_learned_patterns_stage_records(active_run, cli):
+    _seed_learned(active_run)
+    out = cli("learned-patterns", "--stage", "search")[1]
+    assert out == [{"id": "p-search", "name": "T1 first", "body": "Prefer agency data"}]
+
+
+def test_learned_patterns_missing_file(active_run, cli):
+    assert cli("learned-patterns")[1] == {"search": [], "hop_planner": [], "classify": []}
+
+
+def test_record_applied_pattern_dedupes(active_run, cli):
+    code, _, _ = cli("record-applied-pattern", "--pattern-id", "p1", "p1", "p2")
+    assert code == 0
+    assert _run_file(active_run)["applied_patterns"] == ["p1", "p2"]
+
+
+def test_add_seen_urls_dedupes(active_run, cli):
+    cli("add-seen-urls", "--topic", "Greenville ALPR", "--urls", "https://a.example/1", "https://a.example/2")
+    cli("add-seen-urls", "--topic", "Greenville ALPR", "--urls", "https://a.example/2", "https://a.example/3")
+    topic = _run_file(active_run)["topics"][0]
+    assert topic["seen_urls"] == ["https://a.example/1", "https://a.example/2", "https://a.example/3"]
+
+
+def test_add_seen_urls_unknown_topic_fails(active_run, cli):
+    code, _, err = cli("add-seen-urls", "--topic", "Nope", "--urls", "https://a.example/1")
+    assert code == 1 and "Topic not found" in err
+
+
+HOP_RESPONSE = {
+    "topic": "Greenville ALPR",
+    "decision": "continue",
+    "confidence_score": 0.55,
+    "contradiction_rate": 0.1,
+    "next_hop": {"pattern": "causal_chain", "from": "state funding"},
+}
+
+
+def test_apply_hop_decision_continue(active_run, cli):
+    resp = _write(active_run / "hop_response.json", HOP_RESPONSE)
+    hop = _write(active_run / "hop_data.json", {"hop": 1, "pattern": "initial", "sources_kept": 4})
+    code, out, _ = cli("apply-hop-decision", "--topic", "Greenville ALPR",
+                       "--response-file", resp, "--hop-data-file", hop)
+    assert code == 0 and out == {"topic": "Greenville ALPR", "decision": "continue"}
+    t = _run_file(active_run)["topics"][0]
+    assert t["current_hop"] == 1 and t["status"] == "active"
+    assert t["confidence_history"] == [0.55] and t["next_hop"]["pattern"] == "causal_chain"
+    assert t["hop_genealogy"] == [{"hop": 1, "pattern": "initial", "sources_kept": 4}]
+
+
+def test_apply_hop_decision_early_terminated_override(active_run, cli):
+    resp = _write(active_run / "hop_response.json", HOP_RESPONSE)
+    hop = _write(active_run / "hop_data.json", {"hop": 1})
+    out = cli("apply-hop-decision", "--topic", "Greenville ALPR", "--response-file", resp,
+              "--hop-data-file", hop, "--decision", "early_terminated")[1]
+    assert out["decision"] == "early_terminated"
+    t = _run_file(active_run)["topics"][0]
+    assert t["status"] == "early_terminated" and t["next_hop"] is None
+
+
+def test_compute_confidence_needs_no_vault(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    sources = [
+        {"url": "a", "tier": "T1", "is_primary": True, "credibility_score": 0.95},
+        {"url": "b", "tier": "T2", "is_primary": False, "credibility_score": 0.8},
+    ]
+    monkeypatch.chdir(tmp_path)
+    code, out, _ = cli("compute-confidence", "--sources-file", _write(tmp_path / "s.json", sources),
+                       "--depth", "quick")
+    assert code == 0 and out == pytest.approx(compute_confidence(sources, depth="quick"))

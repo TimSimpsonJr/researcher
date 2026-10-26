@@ -20,6 +20,8 @@ from pathlib import Path
 import config_manager
 import migrate as migrate_mod
 import vault_index
+from confidence import compute_confidence
+from learned_patterns import filter_by_topic_text, group_by_stage, load_learned_patterns
 from detect_tier import (
     benchmark_ollama,
     build_tier_report,
@@ -35,11 +37,14 @@ from detect_tier import (
 from state import (
     LockTimeoutError,
     abandon_run,
+    add_seen_urls,
+    apply_hop_decision,
     create_run,
     init_topic,
     is_stale_run,
     load_run,
     load_stage_output,
+    record_applied_pattern,
     save_stage_output,
     save_state,
     update_stage,
@@ -231,6 +236,8 @@ def cmd_init_topics(args):
 
 
 def cmd_update_stage(args):
+    if args.total is None and (args.completed is not None or args.current is not None):
+        raise CLIError("--completed/--current require --total")
     progress = None
     if args.total is not None:
         progress = {"total_notes": args.total, "completed": args.completed, "current": args.current}
@@ -248,6 +255,53 @@ def cmd_save_stage_output(args):
 
 def cmd_load_stage_output(args):
     _out(load_stage_output(_state_dir(args), args.name))
+
+
+# --- hop loop -----------------------------------------------------------------
+
+def cmd_learned_patterns(args):
+    run = load_run(_state_dir(args))
+    topics = [t["topic"] for t in run.get("topics", [])] if run else []
+    lp, warnings = load_learned_patterns(_researcher_dir(args) / "learned_patterns.md")
+    for w in warnings:
+        print(f"WARNING: {w}", file=sys.stderr)
+    grouped = group_by_stage(filter_by_topic_text(lp, topics=topics))
+    if args.stage:
+        _out([{"id": p.id, "name": p.name, "body": p.body} for p in grouped.get(args.stage, [])])
+    else:
+        _out({stage: [p.id for p in patterns] for stage, patterns in grouped.items()})
+
+
+def cmd_record_applied_pattern(args):
+    sd = _state_dir(args)
+    for pid in args.pattern_id:
+        record_applied_pattern(sd, pid)
+    _out({"recorded": args.pattern_id})
+
+
+def cmd_add_seen_urls(args):
+    add_seen_urls(_state_dir(args), topic_name=args.topic, urls=args.urls)
+    _out({"topic": args.topic})
+
+
+def cmd_apply_hop_decision(args):
+    resp = _read_json(args.response_file)
+    decision = args.decision or resp["decision"]
+    apply_hop_decision(
+        _state_dir(args),
+        topic_name=args.topic,
+        hop_data=_read_json(args.hop_data_file),
+        decision=decision,
+        confidence_score=resp["confidence_score"],
+        contradiction_rate=resp["contradiction_rate"],
+        next_hop=resp.get("next_hop"),
+        replan_hint=resp.get("replan_hint"),
+    )
+    _out({"topic": args.topic, "decision": decision})
+
+
+def cmd_compute_confidence(args):
+    _out(compute_confidence(_read_json(args.sources_file), depth=args.depth))
 
 
 # --- entry point --------------------------------------------------------------
@@ -312,6 +366,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stage", help="then set this stage")
     p = add("load-stage-output", cmd_load_stage_output, "print STATE_DIR/<name>.json or null")
     p.add_argument("--name", required=True)
+    p = add("learned-patterns", cmd_learned_patterns,
+            "learned-pattern ids per stage for the run's topics, or one stage's records")
+    p.add_argument("--stage", choices=["search", "hop_planner", "classify"])
+    p = add("record-applied-pattern", cmd_record_applied_pattern, "record injected pattern ids on the run")
+    p.add_argument("--pattern-id", required=True, nargs="+")
+    p = add("add-seen-urls", cmd_add_seen_urls, "append fetched URLs to a topic's seen_urls")
+    p.add_argument("--topic", required=True)
+    p.add_argument("--urls", required=True, nargs="+")
+    p = add("apply-hop-decision", cmd_apply_hop_decision, "atomic Stage 4e hop transition")
+    p.add_argument("--topic", required=True)
+    p.add_argument("--response-file", required=True, help="the hop-planner JSON response")
+    p.add_argument("--hop-data-file", required=True, help="the just-completed hop record")
+    p.add_argument("--decision", choices=["continue", "stop", "early_terminated", "replan"],
+                   help="override the planner decision (early_terminated)")
+    p = add("compute-confidence", cmd_compute_confidence, "confidence score for a sources JSON file")
+    p.add_argument("--sources-file", required=True)
+    p.add_argument("--depth", required=True, choices=["quick", "standard", "deep", "exhaustive"])
     return parser
 
 
