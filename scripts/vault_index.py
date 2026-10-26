@@ -197,3 +197,56 @@ def note_exists(vault_root: Path, title: str) -> bool:
     row = conn.execute("SELECT 1 FROM notes WHERE title = ? LIMIT 1", (title,)).fetchone()
     conn.close()
     return row is not None
+
+
+_MOC_NAME_HINTS = ("MOC", "Index", "Hub", "Overview", "Dashboard")
+_INLINE_TAG = re.compile(r"(?<!\w)#[a-zA-Z][a-zA-Z0-9_/-]+")
+
+
+def scan_conventions(vault_root: Path, sample: int = 50) -> dict:
+    """Detect folder, tag-format, frontmatter and MOC conventions (setup Step 2).
+
+    Counts all non-hidden .md files; inspects the first `sample` of them.
+    """
+    top_folders = sorted(
+        d.name for d in vault_root.iterdir() if d.is_dir() and not d.name.startswith(".")
+    )
+    md_files = [
+        f for f in vault_root.rglob("*.md")
+        if not any(p.startswith(".") for p in f.relative_to(vault_root).parts)
+    ]
+    tag_formats = {"list": 0, "string": 0, "inline": 0, "none": 0}
+    fm_fields: dict[str, int] = {}
+    moc_files: list[str] = []
+    for f in md_files[:sample]:
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if f.stem.startswith("_") or any(k in f.stem for k in _MOC_NAME_HINTS):
+            moc_files.append(f.relative_to(vault_root).as_posix())
+        fm_match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
+        if fm_match:
+            for line in fm_match.group(1).splitlines():
+                if ":" in line:
+                    key = line.split(":")[0].strip()
+                    fm_fields[key] = fm_fields.get(key, 0) + 1
+                if line.strip().startswith("tags:"):
+                    rest = line.split(":", 1)[1].strip()
+                    if rest.startswith("[") or rest.startswith("-") or rest == "":
+                        tag_formats["list"] += 1
+                    else:
+                        tag_formats["string"] += 1
+        elif _INLINE_TAG.search(text):
+            tag_formats["inline"] += 1
+    return {
+        "total_notes": len(md_files),
+        "top_folders": top_folders,
+        "tag_format_counts": tag_formats,
+        "dominant_tag_format": (
+            max(tag_formats, key=tag_formats.get) if any(tag_formats.values()) else "list"
+        ),
+        "frontmatter_fields": sorted(fm_fields, key=lambda k: -fm_fields[k])[:10],
+        "moc_files": moc_files[:10],
+        "moc_pattern": "^_|MOC|Index|Hub" if moc_files else "^_|MOC|Index",
+    }

@@ -135,3 +135,114 @@ def test_vault_search_and_list_notes(vault, cli):
     cli("update-index")
     assert cli("list-notes", "--folder", "Projects/Sub")[1] == ["Projects/Sub/B.md"]
     assert cli("list-notes", "--folder", "Projects\\Sub")[1] == ["Projects/Sub/B.md"]
+
+
+# --- infrastructure ---------------------------------------------------------
+
+import types
+
+
+def test_tier_report_uses_config_searxng_and_repo(vault, cli, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        rw, "build_tier_report", lambda url, repo: seen.append((url, repo)) or {"tier": "base"}
+    )
+    code, out, _ = cli("tier-report")
+    assert code == 0 and out == {"tier": "base"}
+    assert seen == [(None, rw.REPO_ROOT)]
+
+
+def test_detect_tier_passes_url(cli, monkeypatch):
+    monkeypatch.setattr(rw, "detect_tier", lambda url: "mid" if url else "base")
+    assert cli("detect-tier")[1] == "base"
+    assert cli("detect-tier", "--searxng-url", "http://localhost:8888")[1] == "mid"
+
+
+def test_check_dispatches_by_component(cli, monkeypatch):
+    monkeypatch.setattr(rw, "check_ollama", lambda: {"installed": False})
+    monkeypatch.setattr(rw, "check_searxng", lambda url: {"available": False, "url": url})
+    assert cli("check", "ollama")[1] == {"installed": False}
+    assert cli("check", "searxng", "--url", "http://x")[1] == {"available": False, "url": "http://x"}
+    assert set(cli("check", "platform")[1]) == {"os", "arch", "is_wsl"}
+
+
+def test_recommend_model(cli):
+    out = cli("recommend-model", "--ram-gb", "32", "--vram-gb", "16")[1]
+    assert out["model"] == "qwen2.5:14b"
+
+
+def test_hardware_info_and_benchmark_wrappers(cli, monkeypatch):
+    monkeypatch.setattr(
+        rw, "get_hardware_info", lambda: {"total_ram_gb": 16.0, "gpu_vram_gb": 0, "gpu_name": "unknown"}
+    )
+    monkeypatch.setattr(
+        rw, "benchmark_ollama", lambda model: {"elapsed_ms": 5, "output": model, "success": True}
+    )
+    assert cli("hardware-info")[1]["total_ram_gb"] == 16.0
+    assert cli("benchmark-ollama", "--model", "qwen2.5:7b")[1]["output"] == "qwen2.5:7b"
+
+
+def test_scan_vault_cli(vault, cli):
+    out = cli("scan-vault")[1]
+    assert out["total_notes"] == 1 and out["top_folders"] == ["Projects"]
+
+
+def test_get_hardware_info_without_nvidia_smi(monkeypatch):
+    import detect_tier
+    original = detect_tier.subprocess.check_output
+
+    def no_smi(cmd, *a, **k):
+        if cmd[0] == "nvidia-smi":
+            raise FileNotFoundError(cmd[0])
+        return original(cmd, *a, **k)
+
+    monkeypatch.setattr(detect_tier.subprocess, "check_output", no_smi)
+    info = detect_tier.get_hardware_info()
+    assert set(info) == {"total_ram_gb", "gpu_vram_gb", "gpu_name"}
+    assert info["gpu_vram_gb"] == 0 and info["gpu_name"] == "unknown"
+    assert info["total_ram_gb"] >= 0
+
+
+def test_benchmark_ollama_reports_timing(monkeypatch):
+    import detect_tier
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="A fox jumps.\n")
+
+    monkeypatch.setattr(detect_tier.subprocess, "run", fake_run)
+    r = detect_tier.benchmark_ollama("qwen2.5:7b")
+    assert r["success"] is True and r["output"] == "A fox jumps." and r["elapsed_ms"] >= 0
+    assert calls[0][:3] == ["ollama", "run", "qwen2.5:7b"]
+
+
+def test_benchmark_ollama_missing_binary(monkeypatch):
+    import detect_tier
+
+    def boom(cmd, **kw):
+        raise FileNotFoundError("ollama")
+
+    monkeypatch.setattr(detect_tier.subprocess, "run", boom)
+    assert detect_tier.benchmark_ollama("m")["success"] is False
+
+
+def test_scan_conventions(tmp_path):
+    from vault_index import scan_conventions
+    (tmp_path / "Projects").mkdir()
+    (tmp_path / ".obsidian").mkdir()
+    (tmp_path / "_Index.md").write_text("---\ntitle: Index\ntags: [index]\n---\nbody\n", encoding="utf-8")
+    (tmp_path / "Projects" / "A.md").write_text(
+        "---\ntitle: A\ntags: [research]\nsource: x\n---\nbody\n", encoding="utf-8"
+    )
+    (tmp_path / "Loose.md").write_text("no frontmatter #inline-tag here\n", encoding="utf-8")
+    (tmp_path / ".obsidian" / "skip.md").write_text("x", encoding="utf-8")
+    r = scan_conventions(tmp_path)
+    assert r["total_notes"] == 3
+    assert r["top_folders"] == ["Projects"]
+    assert r["moc_files"] == ["_Index.md"]
+    assert r["tag_format_counts"]["list"] == 2
+    assert r["tag_format_counts"]["inline"] == 1
+    assert r["dominant_tag_format"] == "list"
+    assert r["frontmatter_fields"] == ["title", "tags", "source"]
+    assert r["moc_pattern"] == "^_|MOC|Index|Hub"

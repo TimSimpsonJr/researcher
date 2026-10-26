@@ -20,6 +20,18 @@ from pathlib import Path
 import config_manager
 import migrate as migrate_mod
 import vault_index
+from detect_tier import (
+    benchmark_ollama,
+    build_tier_report,
+    check_ollama,
+    check_searxng,
+    check_whisper,
+    check_ytdlp,
+    detect_tier,
+    get_hardware_info,
+    get_platform_info,
+    recommend_model,
+)
 from state import LockTimeoutError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -110,6 +122,46 @@ def cmd_list_notes(args):
     _out([n["path"] for n in notes if n["path"].startswith(prefix)])
 
 
+# --- infrastructure ---------------------------------------------------------
+
+def cmd_tier_report(args):
+    cfg = config_manager.load_config(_vault(args)) or {}
+    _out(build_tier_report(cfg.get("searxng_url"), REPO_ROOT))
+
+
+def cmd_detect_tier(args):
+    _out(detect_tier(args.searxng_url))
+
+
+def cmd_check(args):
+    if args.component == "searxng":
+        _out(check_searxng(args.url))
+        return
+    checks = {
+        "ollama": check_ollama,
+        "ytdlp": check_ytdlp,
+        "whisper": check_whisper,
+        "platform": get_platform_info,
+    }
+    _out(checks[args.component]())
+
+
+def cmd_hardware_info(args):
+    _out(get_hardware_info())
+
+
+def cmd_recommend_model(args):
+    _out(recommend_model(args.ram_gb, args.vram_gb))
+
+
+def cmd_benchmark_ollama(args):
+    _out(benchmark_ollama(args.model))
+
+
+def cmd_scan_vault(args):
+    _out(vault_index.scan_conventions(_vault(args)))
+
+
 # --- entry point --------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -137,6 +189,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p = add("list-notes", cmd_list_notes, "vault-relative paths of indexed notes")
     p.add_argument("--folder", default="", help="only notes under this vault-relative folder")
+    add("tier-report", cmd_tier_report, "Stage 0b tier report (auto-starts SearXNG)")
+    p = add("detect-tier", cmd_detect_tier, "highest available tier, no auto-start")
+    p.add_argument("--searxng-url")
+    p = add("check", cmd_check, "check one component")
+    p.add_argument("component", choices=["ollama", "ytdlp", "whisper", "searxng", "platform"])
+    p.add_argument("--url", help="SearXNG URL (for: check searxng)")
+    add("hardware-info", cmd_hardware_info, "total RAM and GPU VRAM in GB")
+    p = add("recommend-model", cmd_recommend_model, "Ollama model for this hardware")
+    p.add_argument("--ram-gb", type=float, required=True)
+    p.add_argument("--vram-gb", type=float, required=True)
+    p = add("benchmark-ollama", cmd_benchmark_ollama, "time one short Ollama prompt")
+    p.add_argument("--model", required=True)
+    add("scan-vault", cmd_scan_vault, "detect vault folder/tag/frontmatter/MOC conventions")
     return parser
 
 
