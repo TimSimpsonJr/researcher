@@ -32,7 +32,18 @@ from detect_tier import (
     get_platform_info,
     recommend_model,
 )
-from state import LockTimeoutError
+from state import (
+    LockTimeoutError,
+    abandon_run,
+    create_run,
+    init_topic,
+    is_stale_run,
+    load_run,
+    load_stage_output,
+    save_stage_output,
+    save_state,
+    update_stage,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -162,6 +173,83 @@ def cmd_scan_vault(args):
     _out(vault_index.scan_conventions(_vault(args)))
 
 
+# --- run lifecycle ----------------------------------------------------------
+
+def _active_run(state_dir: Path) -> dict:
+    run = load_run(state_dir)
+    if run is None:
+        raise CLIError("no active run")
+    return run
+
+
+def cmd_check_run(args):
+    sd = _state_dir(args)
+    run = load_run(sd)
+    if run is not None:
+        run["is_stale"] = is_stale_run(sd)
+    _out(run)
+
+
+def cmd_abandon_run(args):
+    sd = _state_dir(args)
+    run = load_run(sd)
+    if run is None:
+        _out({"archived": None})
+        return
+    if args.at_gate:
+        run["abandoned_at_gate"] = True
+        save_state(sd, run)
+    abandon_run(sd)
+    _out({"archived": str(sd / "history" / run["run_id"])})
+
+
+def cmd_create_run(args):
+    sd = _state_dir(args)
+    create_run(sd, args.run_id, args.tier)
+    update_stage(sd, "triage")
+    _out(load_run(sd))
+
+
+def cmd_set_strategy(args):
+    sd = _state_dir(args)
+    run = _active_run(sd)
+    run["strategy"] = args.strategy
+    save_state(sd, run)
+    _out({"strategy": args.strategy})
+
+
+def cmd_init_topics(args):
+    sd = _state_dir(args)
+    plan = _read_json(args.plan_file)
+    run = _active_run(sd)
+    run["topics"] = [init_topic(t["topic"], t["mode"], t["depth"]) for t in plan["topics"]]
+    save_state(sd, run)
+    update_stage(sd, "hop_loop")
+    if args.save_plan:
+        save_stage_output(sd, "research_plan", plan)
+    _out({"topics": len(run["topics"]), "stage": "hop_loop"})
+
+
+def cmd_update_stage(args):
+    progress = None
+    if args.total is not None:
+        progress = {"total_notes": args.total, "completed": args.completed, "current": args.current}
+    update_stage(_state_dir(args), args.stage, progress)
+    _out({"stage": args.stage})
+
+
+def cmd_save_stage_output(args):
+    sd = _state_dir(args)
+    save_stage_output(sd, args.name, _read_json(args.file))
+    if args.stage:
+        update_stage(sd, args.stage)
+    _out({"saved": str(sd / f"{args.name}.json"), "stage": args.stage})
+
+
+def cmd_load_stage_output(args):
+    _out(load_stage_output(_state_dir(args), args.name))
+
+
 # --- entry point --------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -202,6 +290,28 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("benchmark-ollama", cmd_benchmark_ollama, "time one short Ollama prompt")
     p.add_argument("--model", required=True)
     add("scan-vault", cmd_scan_vault, "detect vault folder/tag/frontmatter/MOC conventions")
+    add("check-run", cmd_check_run, "active run (with is_stale) or null")
+    p = add("abandon-run", cmd_abandon_run, "archive the active run to history/")
+    p.add_argument("--at-gate", action="store_true", help="mark abandoned_at_gate first (Stage 5c)")
+    p = add("create-run", cmd_create_run, "create the run and set stage triage")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--tier", required=True)
+    p = add("set-strategy", cmd_set_strategy, "persist the resolver strategy on the run")
+    p.add_argument("--strategy", required=True, choices=["planning_only", "intent_planning", "unified"])
+    p = add("init-topics", cmd_init_topics, "init topics from a plan file; stage becomes hop_loop")
+    p.add_argument("--plan-file", required=True)
+    p.add_argument("--save-plan", action="store_true", help="also save research_plan.json (Stage 3b)")
+    p = add("update-stage", cmd_update_stage, "set the run stage, optionally with write progress")
+    p.add_argument("--stage", required=True)
+    p.add_argument("--total", type=int)
+    p.add_argument("--completed", type=int)
+    p.add_argument("--current")
+    p = add("save-stage-output", cmd_save_stage_output, "save a JSON file as STATE_DIR/<name>.json")
+    p.add_argument("--name", required=True)
+    p.add_argument("--file", required=True)
+    p.add_argument("--stage", help="then set this stage")
+    p = add("load-stage-output", cmd_load_stage_output, "print STATE_DIR/<name>.json or null")
+    p.add_argument("--name", required=True)
     return parser
 
 

@@ -246,3 +246,107 @@ def test_scan_conventions(tmp_path):
     assert r["dominant_tag_format"] == "list"
     assert r["frontmatter_fields"] == ["title", "tags", "source"]
     assert r["moc_pattern"] == "^_|MOC|Index|Hub"
+
+
+# --- run lifecycle ----------------------------------------------------------
+
+PLAN = {
+    "project": "ALPR",
+    "topics": [
+        {"topic": "Greenville ALPR", "mode": "web_research", "depth": "quick"},
+        {"topic": "Flock Safety contracts", "mode": "web_research", "depth": "standard"},
+    ],
+}
+
+
+def _state(vault):
+    return vault / ".researcher" / "state"
+
+
+def _run_file(vault):
+    return json.loads((_state(vault) / "current_run.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def active_run(vault, cli):
+    assert cli("create-run", "--run-id", "r1", "--tier", "base")[0] == 0
+    assert cli("init-topics", "--plan-file", _write(vault / "plan.json", PLAN))[0] == 0
+    return vault
+
+
+def test_check_run_null_then_active(vault, cli):
+    code, out, _ = cli("check-run")
+    assert code == 0 and out is None
+    code, out, _ = cli("create-run", "--run-id", "r1", "--tier", "base")
+    assert code == 0 and out["run_id"] == "r1" and out["stage"] == "triage"
+    out = cli("check-run")[1]
+    assert out["run_id"] == "r1" and out["is_stale"] is False
+
+
+def test_create_run_refuses_second_active_run(vault, cli):
+    cli("create-run", "--run-id", "r1", "--tier", "base")
+    code, _, err = cli("create-run", "--run-id", "r2", "--tier", "base")
+    assert code == 1 and "Active incomplete run" in err
+
+
+def test_set_strategy(active_run, cli):
+    assert cli("set-strategy", "--strategy", "unified")[1] == {"strategy": "unified"}
+    assert _run_file(active_run)["strategy"] == "unified"
+
+
+def test_init_topics_sets_topics_and_stage(active_run, cli):
+    run = _run_file(active_run)
+    assert [t["topic"] for t in run["topics"]] == ["Greenville ALPR", "Flock Safety contracts"]
+    assert [t["max_hops"] for t in run["topics"]] == [1, 3]
+    assert run["stage"] == "hop_loop"
+    assert not (_state(active_run) / "research_plan.json").exists()
+
+
+def test_init_topics_save_plan(vault, cli):
+    cli("create-run", "--run-id", "r1", "--tier", "base")
+    code, out, _ = cli("init-topics", "--plan-file", _write(vault / "plan.json", PLAN), "--save-plan")
+    assert code == 0 and out == {"topics": 2, "stage": "hop_loop"}
+    saved = json.loads((_state(vault) / "research_plan.json").read_text(encoding="utf-8"))
+    assert saved == PLAN
+
+
+def test_update_stage_with_progress(active_run, cli):
+    assert cli("update-stage", "--stage", "resolve")[1] == {"stage": "resolve"}
+    assert _run_file(active_run)["stage"] == "resolve"
+    cli("update-stage", "--stage", "write", "--total", "5", "--completed", "2", "--current", "Alpha note")
+    run = _run_file(active_run)
+    assert run["stage"] == "write"
+    assert run["stage_progress"] == {"total_notes": 5, "completed": 2, "current": "Alpha note"}
+
+
+def test_save_and_load_stage_output(active_run, cli):
+    classification = {"notes_to_create": [{"title": "Alpha"}]}
+    src = _write(active_run / "classify_response.json", classification)
+    code, out, _ = cli("save-stage-output", "--name", "classification", "--file", src, "--stage", "write")
+    assert code == 0 and out["stage"] == "write"
+    assert _run_file(active_run)["stage"] == "write"
+    assert cli("load-stage-output", "--name", "classification")[1] == classification
+    assert cli("load-stage-output", "--name", "written_notes")[1] is None
+
+
+def test_abandon_run_archives(active_run, cli):
+    code, out, _ = cli("abandon-run")
+    archived = _state(active_run).resolve() / "history" / "r1"
+    assert code == 0 and out == {"archived": str(archived)}
+    assert (archived / "current_run.json").is_file()
+    assert cli("check-run")[1] is None
+
+
+def test_abandon_run_at_gate_marks_run(active_run, cli):
+    out = cli("abandon-run", "--at-gate")[1]
+    archived = json.loads((Path(out["archived"]) / "current_run.json").read_text(encoding="utf-8"))
+    assert archived["abandoned_at_gate"] is True
+
+
+def test_abandon_run_without_run(vault, cli):
+    assert cli("abandon-run")[1] == {"archived": None}
+
+
+def test_state_command_without_run_fails(vault, cli):
+    code, _, err = cli("set-strategy", "--strategy", "unified")
+    assert code == 1 and "no active run" in err
