@@ -441,6 +441,87 @@ def apply_hop_decision(
     save_state(state_dir, run)
 
 
+QUALITY_MAX_CONTRADICTION = 0.3
+
+
+def _latest_confidence(topic: dict) -> float:
+    return topic["confidence_history"][-1] if topic["confidence_history"] else 0.0
+
+
+def topic_passes(topic: dict) -> bool:
+    """Stage 5a: latest confidence >= the depth's confidence_target AND
+    contradiction_rate <= 0.3. A topic with no confidence yet scores 0.0."""
+    target = get_depth_profile(topic["depth"])["confidence_target"]
+    return (_latest_confidence(topic) >= target
+            and topic["contradiction_rate"] <= QUALITY_MAX_CONTRADICTION)
+
+
+def quality_gate(run: dict) -> dict:
+    """Stage 5a per-topic pass/fail for the run.
+
+    worst_confidence (the lowest latest confidence, 0.0 if none) is the
+    OVERALL_CONFIDENCE surfaced in Stage 5c prompts and 5d's
+    final_confidence_score -- depths are per-topic, so there is no single
+    run target.
+    """
+    topics = [
+        {
+            "topic": t["topic"],
+            "depth": t["depth"],
+            "confidence": _latest_confidence(t),
+            "contradiction_rate": t["contradiction_rate"],
+            "replan_hint": t.get("replan_hint"),
+            "passes": topic_passes(t),
+        }
+        for t in run["topics"]
+    ]
+    return {
+        "passed": all(t["passes"] for t in topics),
+        "failing_topics": [t for t in topics if not t["passes"]],
+        "topics": topics,
+        "worst_confidence": min((t["confidence"] for t in topics), default=0.0),
+        "replan_count": run["replan_count"],
+    }
+
+
+def aggregate_hop_summaries(state_dir: Path, project: str) -> dict:
+    """Stage 6a: merge every summaries_hop*.json's items into summaries.json."""
+    items: list = []
+    for hop_file in sorted(state_dir.glob("summaries_hop*.json")):
+        items.extend(json.loads(hop_file.read_text(encoding="utf-8")).get("items", []))
+    combined = {"topic": project, "items": items}
+    save_stage_output(state_dir, "summaries", combined)
+    return combined
+
+
+def aggregate_fetch_results(state_dir: Path) -> dict:
+    """Stage 7a: merge fetch_results_hop*.json into fetch_results_aggregated.json
+    as {fetched, by_url}. Later hops win on URL collisions. Written atomically
+    (temp + rename) so a crash never leaves a half-written file for resume."""
+    by_url: dict = {}
+    for hop_file in sorted(state_dir.glob("fetch_results_hop*.json")):
+        for entry in json.loads(hop_file.read_text(encoding="utf-8")).get("fetched", []):
+            by_url[entry["url"]] = entry
+    combined = {"fetched": list(by_url.values()), "by_url": by_url}
+    save_stage_output(state_dir, "fetch_results_aggregated", combined)
+    return combined
+
+
+def note_modified_since(path: Path, since_iso: str) -> dict:
+    """Stage 7c.i mtime guard: {'conflict': bool, 'mtime': str | None}.
+
+    conflict is True when the note exists and was modified after since_iso
+    (a naive timestamp is treated as UTC).
+    """
+    if not path.exists():
+        return {"conflict": False, "mtime": None}
+    since = datetime.fromisoformat(since_iso)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    file_time = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    return {"conflict": file_time > since, "mtime": str(file_time)}
+
+
 def init_topic(topic: str, mode: str, depth: str) -> dict:
     """Create a fresh topic state entry for the run.
 

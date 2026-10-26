@@ -38,13 +38,20 @@ from state import (
     LockTimeoutError,
     abandon_run,
     add_seen_urls,
+    aggregate_fetch_results,
+    aggregate_hop_summaries,
+    append_written_note,
     apply_hop_decision,
+    apply_replan_readmit,
     create_run,
     init_topic,
     is_stale_run,
     load_run,
     load_stage_output,
+    note_modified_since,
+    quality_gate,
     record_applied_pattern,
+    record_user_decision,
     save_stage_output,
     save_state,
     update_stage,
@@ -304,6 +311,55 @@ def cmd_compute_confidence(args):
     _out(compute_confidence(_read_json(args.sources_file), depth=args.depth))
 
 
+# --- quality gate, aggregation, write -----------------------------------------
+
+def cmd_quality_gate(args):
+    _out(quality_gate(_active_run(_state_dir(args))))
+
+
+def cmd_apply_replan_readmit(args):
+    sd = _state_dir(args)
+    apply_replan_readmit(sd, _read_json(args.specs_file))
+    _out({"replan_count": _active_run(sd)["replan_count"], "stage": "hop_loop"})
+
+
+def cmd_record_user_decision(args):
+    details = {} if args.confidence is None else {"confidence": args.confidence}
+    record_user_decision(_state_dir(args), decision=args.decision, **details)
+    _out({"decision": args.decision})
+
+
+def cmd_set_low_confidence(args):
+    sd = _state_dir(args)
+    run = _active_run(sd)
+    run["low_confidence"] = True
+    run["final_confidence_score"] = args.confidence
+    save_state(sd, run)
+    _out({"low_confidence": True, "final_confidence_score": args.confidence})
+
+
+def cmd_aggregate_summaries(args):
+    sd = _state_dir(args)
+    combined = aggregate_hop_summaries(sd, args.project)
+    _out({"path": str(sd / "summaries.json"), "items": len(combined["items"])})
+
+
+def cmd_aggregate_fetch_results(args):
+    sd = _state_dir(args)
+    combined = aggregate_fetch_results(sd)
+    _out({"path": str(sd / "fetch_results_aggregated.json"), "fetched": len(combined["fetched"])})
+
+
+def cmd_check_mtime(args):
+    since = args.since or _active_run(_state_dir(args))["started_at"]
+    _out(note_modified_since(Path(args.path), since))
+
+
+def cmd_append_written_note(args):
+    append_written_note(_state_dir(args), args.topic, args.path, args.model)
+    _out({"path": args.path})
+
+
 # --- entry point --------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -383,6 +439,26 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("compute-confidence", cmd_compute_confidence, "confidence score for a sources JSON file")
     p.add_argument("--sources-file", required=True)
     p.add_argument("--depth", required=True, choices=["quick", "standard", "deep", "exhaustive"])
+    add("quality-gate", cmd_quality_gate, "Stage 5a per-topic pass/fail and worst confidence")
+    p = add("apply-replan-readmit", cmd_apply_replan_readmit, "atomic Stage 5b/5c re-admission")
+    p.add_argument("--specs-file", required=True,
+                   help="JSON list of {topic_name, replan_hint (object or null)}")
+    p = add("record-user-decision", cmd_record_user_decision, "log a quality-gate user decision")
+    p.add_argument("--decision", required=True)
+    p.add_argument("--confidence", type=float)
+    p = add("set-low-confidence", cmd_set_low_confidence, "flag the run low-confidence (Stage 5d)")
+    p.add_argument("--confidence", type=float, required=True)
+    p = add("aggregate-summaries", cmd_aggregate_summaries, "merge summaries_hop*.json into summaries.json")
+    p.add_argument("--project", required=True)
+    add("aggregate-fetch-results", cmd_aggregate_fetch_results,
+        "merge fetch_results_hop*.json into fetch_results_aggregated.json")
+    p = add("check-mtime", cmd_check_mtime, "was this note modified after the run started?")
+    p.add_argument("--path", required=True)
+    p.add_argument("--since", help="ISO timestamp (default: the run's started_at)")
+    p = add("append-written-note", cmd_append_written_note, "record a written note")
+    p.add_argument("--topic", required=True)
+    p.add_argument("--path", required=True)
+    p.add_argument("--model", required=True)
     return parser
 
 

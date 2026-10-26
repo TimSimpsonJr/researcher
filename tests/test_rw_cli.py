@@ -369,6 +369,8 @@ def _seed_learned(vault):
         LearnedPatternsFile(patterns=[
             LearnedPattern(id="p-search", name="T1 first", body="Prefer agency data",
                            domain_tags=["alpr"], target_stage="search"),
+            LearnedPattern(id="p-search-offtopic", name="Zoning first", body="Check zoning maps",
+                           domain_tags=["zoning"], target_stage="search"),
             LearnedPattern(id="p-hop", name="Follow money", body="Trace contracts",
                            domain_tags=["flock"], target_stage="hop_planner"),
             LearnedPattern(id="p-other", name="Unrelated", body="x",
@@ -387,6 +389,7 @@ def test_learned_patterns_groups_ids_by_stage(active_run, cli):
 def test_learned_patterns_stage_records(active_run, cli):
     _seed_learned(active_run)
     out = cli("learned-patterns", "--stage", "search")[1]
+    # p-search-offtopic is also a search-stage pattern but its tag matches no run topic
     assert out == [{"id": "p-search", "name": "T1 first", "body": "Prefer agency data"}]
 
 
@@ -453,3 +456,96 @@ def test_compute_confidence_needs_no_vault(tmp_path, cli, monkeypatch):
     code, out, _ = cli("compute-confidence", "--sources-file", _write(tmp_path / "s.json", sources),
                        "--depth", "quick")
     assert code == 0 and out == pytest.approx(compute_confidence(sources, depth="quick"))
+
+
+# --- quality gate, aggregation, write ---------------------------------------
+
+def test_topic_passes_boundaries():
+    from state import topic_passes
+    base = {"depth": "quick", "confidence_history": [0.6], "contradiction_rate": 0.3}
+    assert topic_passes(base)
+    assert not topic_passes({**base, "contradiction_rate": 0.31})
+    assert not topic_passes({**base, "confidence_history": [0.59]})
+    assert not topic_passes({**base, "confidence_history": []})
+
+
+def test_quality_gate_fails_topics_without_confidence(active_run, cli):
+    code, out, _ = cli("quality-gate")
+    assert code == 0 and out["passed"] is False
+    assert [t["topic"] for t in out["failing_topics"]] == ["Greenville ALPR", "Flock Safety contracts"]
+    assert out["worst_confidence"] == 0.0 and out["replan_count"] == 0
+
+
+def test_quality_gate_passes_when_targets_met(active_run, cli):
+    resp = _write(active_run / "resp.json",
+                  {"decision": "stop", "confidence_score": 0.95, "contradiction_rate": 0.1})
+    hop = _write(active_run / "hop.json", {"hop": 1, "pattern": "initial"})
+    for topic in ("Greenville ALPR", "Flock Safety contracts"):
+        assert cli("apply-hop-decision", "--topic", topic, "--response-file", resp,
+                   "--hop-data-file", hop)[0] == 0
+    out = cli("quality-gate")[1]
+    assert out["passed"] is True and out["failing_topics"] == [] and out["worst_confidence"] == 0.95
+
+
+def test_apply_replan_readmit(active_run, cli):
+    specs = _write(active_run / "replan_specs.json",
+                   [{"topic_name": "Greenville ALPR", "replan_hint": {"issue": "thin sources"}}])
+    cli("update-stage", "--stage", "quality_gate")
+    code, out, _ = cli("apply-replan-readmit", "--specs-file", specs)
+    assert code == 0 and out == {"replan_count": 1, "stage": "hop_loop"}
+    run = _run_file(active_run)
+    assert run["stage"] == "hop_loop"
+    assert run["topics"][0]["max_hops"] == 2
+    assert run["topics"][0]["replan_hint"] == {"issue": "thin sources"}
+
+
+def test_record_user_decision(active_run, cli):
+    assert cli("record-user-decision", "--decision", "continue", "--confidence", "0.42")[0] == 0
+    entry = _run_file(active_run)["user_decisions"][-1]
+    assert entry["decision"] == "continue" and entry["confidence"] == 0.42
+
+
+def test_set_low_confidence(active_run, cli):
+    cli("set-low-confidence", "--confidence", "0.42")
+    run = _run_file(active_run)
+    assert run["low_confidence"] is True and run["final_confidence_score"] == 0.42
+
+
+def test_aggregate_summaries(active_run, cli):
+    sd = _state(active_run)
+    _write(sd / "summaries_hop1.json", {"topic": "ALPR", "items": [{"url": "a"}]})
+    _write(sd / "summaries_hop2.json", {"topic": "ALPR", "items": [{"url": "b"}]})
+    code, out, _ = cli("aggregate-summaries", "--project", "ALPR")
+    assert code == 0 and out["items"] == 2
+    combined = json.loads((sd / "summaries.json").read_text(encoding="utf-8"))
+    assert combined == {"topic": "ALPR", "items": [{"url": "a"}, {"url": "b"}]}
+
+
+def test_aggregate_fetch_results_later_hop_wins(active_run, cli):
+    sd = _state(active_run)
+    _write(sd / "fetch_results_hop1.json", {"fetched": [{"url": "a", "content": "old"}], "failed": []})
+    _write(sd / "fetch_results_hop2.json",
+           {"fetched": [{"url": "a", "content": "new"}, {"url": "b", "content": "b"}]})
+    code, out, _ = cli("aggregate-fetch-results")
+    assert code == 0 and out["fetched"] == 2
+    agg = json.loads((sd / "fetch_results_aggregated.json").read_text(encoding="utf-8"))
+    assert agg["by_url"]["a"]["content"] == "new"
+    assert [e["url"] for e in agg["fetched"]] == ["a", "b"]
+    assert not (sd / "fetch_results_aggregated.tmp").exists()
+
+
+def test_check_mtime(active_run, cli):
+    note = active_run / "Projects" / "Alpha.md"
+    future = time.time() + 60
+    os.utime(note, (future, future))
+    assert cli("check-mtime", "--path", note)[1]["conflict"] is True
+    assert cli("check-mtime", "--path", note, "--since", "2999-01-01T00:00:00+00:00")[1]["conflict"] is False
+    assert cli("check-mtime", "--path", active_run / "missing.md")[1] == {"conflict": False, "mtime": None}
+
+
+def test_append_written_note(active_run, cli):
+    cli("append-written-note", "--topic", "Greenville ALPR", "--path", "Projects/Alpha.md", "--model", "sonnet")
+    written = cli("load-stage-output", "--name", "written_notes")[1]
+    assert [(n["topic"], n["path"], n["model"]) for n in written["completed"]] == [
+        ("Greenville ALPR", "Projects/Alpha.md", "sonnet")
+    ]
