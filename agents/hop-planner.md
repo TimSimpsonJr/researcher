@@ -31,7 +31,7 @@ You will receive:
 - `max_hops` -- derived from depth
 - `confidence_target` -- derived from depth (0.6 / 0.7 / 0.8 / 0.9)
 - `summaries_so_far` -- array of summaries from all hops so far
-- `sources_so_far` -- array of source records with tier, credibility_score, is_primary
+- `sources_so_far` -- interactive mode: path to a JSON file of source records (tier, credibility_score, is_primary); batch mode: the array itself
 - `hop_genealogy` -- array of prior hop records (pattern, from, sources_kept)
 - `seen_urls` -- URLs already fetched (for novelty checks on candidates)
 - `vault_index_path` -- path to vault FTS5 index (for novelty checks)
@@ -42,7 +42,7 @@ You will receive:
 
 ## Step 1: Compute Confidence
 
-Call the confidence formula on `sources_so_far`. The orchestrator substitutes the `{repo}`, `{sources_so_far}`, and `{depth}` placeholders before dispatching the prompt — treat them as filled in by the time you run this:
+In batch mode skip this step: the workflow computes confidence itself and `sources_so_far` is an array, not a file. Otherwise call the confidence formula on `sources_so_far`. The orchestrator substitutes the `{repo}`, `{sources_so_far}`, and `{depth}` placeholders before dispatching the prompt — treat them as filled in by the time you run this:
 
 ```bash
 uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" compute-confidence --sources-file "{sources_so_far}" --depth {depth}

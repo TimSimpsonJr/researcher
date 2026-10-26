@@ -79,9 +79,10 @@ _SCANNED = sorted([
 _PLACEHOLDERS = ("{{REPO_ROOT}}", "{{VAULT_ROOT}}", "{{PYTHON_PATH}}", "{{SCRIPTS_DIR}}")
 # A python/python3 command: followed by a flag, a quote, or a .py path.
 _BARE_PYTHON = re.compile(r"(?<![\w./-])python3?(?:\.exe)?[ \t]+(?:-|\"|'|\S+\.py\b)")
-_RW_CALL = re.compile(r"rw\.py\"[ \t]+([a-z][a-z-]*)")
+_RW_CALL = re.compile(r"rw\.py[\"']?[ \t]+([a-z][a-z-]*)")
 # A real uv invocation: `uv run ...` / `uv sync ...` at a command position.
-_UV_CALL = re.compile(r"(?<![\w./-])uv[ \t]+(?:run|sync)\b[^\n]*")
+_UV_CALL = re.compile(r"(?<![\w./-])uv[ \t]+(?:run|sync)\b")
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\|")
 
 
 def _bare_python_hits(text: str) -> list[str]:
@@ -89,7 +90,25 @@ def _bare_python_hits(text: str) -> list[str]:
 
 
 def _unfrozen_uv_hits(text: str) -> list[str]:
-    return [m.group(0) for m in _UV_CALL.finditer(text) if "--frozen" not in m.group(0)]
+    hits = []
+    for line in text.splitlines():
+        for seg in _SEGMENT_SPLIT.split(line):
+            m = _UV_CALL.search(seg)
+            if m and "--frozen" not in seg[m.start():]:
+                hits.append(seg.strip())
+    return hits
+
+
+def _rw_names(text: str) -> list[str]:
+    # Only uv invocations (a segment split on shell operators and backticks that
+    # holds `uv run`); skips prose like "rw.py cannot find it" on the same line.
+    return [
+        n
+        for line in text.splitlines()
+        for seg in re.split(r"&&|\|\||;|\||`", line)
+        if _UV_CALL.search(seg)
+        for n in _RW_CALL.findall(seg)
+    ]
 
 
 def _rw_subcommands() -> set[str]:
@@ -121,6 +140,13 @@ def test_scanner_catches_known_bad_lines():
     assert _unfrozen_uv_hits('uv sync --project "R"')
     assert not _unfrozen_uv_hits('uv run --frozen --project "R" "R/scripts/rw.py" locate')
     assert not _unfrozen_uv_hits("uv --version")
+    assert _unfrozen_uv_hits('uv sync --project R && uv run --frozen --project R x.py')
+    assert _unfrozen_uv_hits('uv run --frozen --project R x.py; uv run --project R y.py')
+    assert not _unfrozen_uv_hits('uv sync --frozen --project R && uv run --frozen x.py | cat')
+    assert _rw_names('uv run --frozen --project R R/scripts/rw.py bogus-cmd') == ["bogus-cmd"]
+    assert _rw_names("uv run --frozen --project R 'R/scripts/rw.py' bogus-cmd") == ["bogus-cmd"]
+    assert _rw_names('uv run --frozen --project R "R/scripts/rw.py" locate') == ["locate"]
+    assert _rw_names("so rw.py cannot find it") == []
 
 
 def test_scanned_files_present():
@@ -151,7 +177,7 @@ def test_every_rw_subcommand_referenced_exists():
     known = _rw_subcommands()
     used: dict[str, str] = {}
     for path in _SCANNED:
-        for name in _RW_CALL.findall(path.read_text(encoding="utf-8")):
+        for name in _rw_names(path.read_text(encoding="utf-8")):
             used.setdefault(name, _rel(path))
     assert used, "expected rw.py calls in skills/agents"
     assert {n: f for n, f in used.items() if n not in known} == {}

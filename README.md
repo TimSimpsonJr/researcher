@@ -109,9 +109,11 @@ See [MANIFEST.md](MANIFEST.md) for the full file tree and how the pieces fit tog
 ## For developers
 
 ```bash
-uv sync
-uv run pytest
+uv sync --frozen
+uv run --frozen pytest
 ```
+
+Everything runs with `--frozen`, so uv never rewrites `uv.lock` on its own. Run `uv lock` when you deliberately want to update it.
 
 The Python suite runs offline, no API key needed. The batch workflow's JavaScript helpers have their own `node --test` suite (run `node --test` from the repo root).
 
