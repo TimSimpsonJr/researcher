@@ -45,6 +45,23 @@ def _config_path(vault_root: Path) -> Path:
     return vault_root / CONFIG_DIR_NAME / CONFIG_FILE_NAME
 
 
+OLD_CONFIG_DIR_NAME = ".research-workflow"
+
+
+def find_vault(start: Path) -> Path | None:
+    """Walk up from `start` to the first directory holding a researcher config.
+
+    Accepts the pre-rename `.research-workflow/config.json` too, so Stage 0a's
+    migrate step can still find a vault that has not been migrated yet.
+    Returns None when no ancestor has one.
+    """
+    for d in (start, *start.parents):
+        for name in (CONFIG_DIR_NAME, OLD_CONFIG_DIR_NAME):
+            if (d / name / CONFIG_FILE_NAME).is_file():
+                return d
+    return None
+
+
 def load_config(vault_root: Path) -> dict | None:
     """Load config from vault. Returns None if not found."""
     path = _config_path(vault_root)

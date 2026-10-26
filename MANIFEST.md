@@ -26,6 +26,7 @@ agents/
   fetch-summarize-runner.md            # Haiku — drives fetch_and_clean.py + summarize.py for the batch workflow
 
 scripts/
+  rw.py                                # one-line CLI for all skill/agent Python glue; JSON out; run via uv run --frozen --project
   config_manager.py                    # JSON vault config at {vault}/.researcher/config.json; batch_threshold (default 10)
   state.py                             # v3 schema + atomic transitions (apply_hop_decision, apply_replan_readmit, acquire_state_lock)
   accumulator.py / learned_patterns.py # v3.1 candidate store + graduated-pattern md parser/writer at {vault}/.researcher/
