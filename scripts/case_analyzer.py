@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -20,10 +21,13 @@ from accumulator import (
     record_observation,
     tick_staleness,
     mark_promotion_pending,
+    mark_rejected,
+    clear_promotion_pending,
     demote,
     remove_entry,  # NEW for partial-write recovery
 )
 from learned_patterns import (
+    LearnedPattern,
     LearnedPatternsFile,
     load_learned_patterns,
     save_learned_patterns,
@@ -368,3 +372,68 @@ def dispatch_semantic_compare(
         return {"is_same": False, "reason": "timeout — treating as distinct"}
     except (json.JSONDecodeError, FileNotFoundError) as e:
         return {"is_same": False, "reason": f"dispatch error: {e}"}
+
+
+# --- Stage 10e graduation (caller holds state.acquire_state_lock) ------------
+
+def _corrupt(name: str, warnings: list[str]) -> str:
+    return f"refusing to save over corrupt {name}: {warnings}"
+
+
+def promote_candidate(
+    pattern_id: str, *, accumulator_path: Path, learned_patterns_path: Path
+) -> str | None:
+    """Promote an accumulator entry into learned_patterns.md.
+
+    Returns None on success, or an abort reason when either store loaded with
+    warnings (saving would clobber a user-recoverable corrupt file). Write
+    order: learned_patterns first, then accumulator; an id already present in
+    learned_patterns is not re-added (recovery from a promotion that wrote one
+    file but not the other). Raises KeyError if the id is not in the accumulator.
+    """
+    lp, lp_warnings = load_learned_patterns(learned_patterns_path)
+    if lp_warnings:
+        return _corrupt("learned_patterns.md", lp_warnings)
+    acc, acc_warnings = load_accumulator(accumulator_path)
+    if acc_warnings:
+        return _corrupt("accumulator.json", acc_warnings)
+    entry = next((e for e in acc.entries if e.pattern_id == pattern_id), None)
+    if entry is None:
+        raise KeyError(f"pattern not in accumulator: {pattern_id}")
+    if not any(p.id == entry.pattern_id for p in lp.patterns):
+        lp.patterns.append(LearnedPattern(
+            id=entry.pattern_id,
+            name=entry.name,
+            body=entry.proposed_promotion_body,
+            domain_tags=entry.domain_tags,
+            target_stage=entry.target_stage,
+            category=entry.category,
+            wins=0,
+            losses=0,
+            promoted_at=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            demotion_count=entry.demotion_count,
+        ))
+        save_learned_patterns(learned_patterns_path, lp)
+    remove_entry(acc, pattern_id)
+    save_accumulator(accumulator_path, acc)
+    return None
+
+
+def reject_candidate(pattern_id: str, *, accumulator_path: Path) -> str | None:
+    """Permanently reject an accumulator entry. Abort reason on a corrupt store."""
+    acc, acc_warnings = load_accumulator(accumulator_path)
+    if acc_warnings:
+        return _corrupt("accumulator.json", acc_warnings)
+    mark_rejected(acc, pattern_id)
+    save_accumulator(accumulator_path, acc)
+    return None
+
+
+def hold_candidate(pattern_id: str, *, accumulator_path: Path) -> str | None:
+    """Clear promotion_pending (status back to hold). Abort reason on a corrupt store."""
+    acc, acc_warnings = load_accumulator(accumulator_path)
+    if acc_warnings:
+        return _corrupt("accumulator.json", acc_warnings)
+    clear_promotion_pending(acc, pattern_id)
+    save_accumulator(accumulator_path, acc)
+    return None

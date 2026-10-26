@@ -721,3 +721,50 @@ def write_case_record(cases_dir: Path, case_data: dict) -> None:
     case_id = case_data["case_id"]
     case_file = cases_dir / f"{case_id}.json"
     case_file.write_text(json.dumps(case_data, indent=2), encoding="utf-8", newline="\n")
+
+
+_CASE_DEPTHS = ("quick", "standard", "deep", "exhaustive")
+
+
+def _pattern_dict(value) -> dict:
+    """pattern_detection calls .get() on patterns_that_* (keys source_tiers,
+    hop_chain, queries), so they must be dicts. A list or free text from the
+    orchestrator goes under a 'notes' key instead of crashing Stage 10d."""
+    if isinstance(value, dict):
+        return value
+    return {"notes": value} if value else {}
+
+
+def build_case_record(final: dict, inputs: dict) -> dict:
+    """Stage 10c: assemble the case record from complete_run()'s final dict plus
+    the orchestrator's end-of-run inputs (query, domain_tags,
+    patterns_that_worked / patterns_that_failed, sources_processed,
+    notes_created, notes_updated).
+
+    applied_patterns comes from the run itself: Stage 10d's W/L scoring reads
+    it, and dropping it silently turns the score/demotion loop into a no-op.
+    """
+    topics = final.get("topics", [])
+    return {
+        "case_id": final["run_id"],
+        "version": 1,
+        "query": inputs["query"],
+        "domain_tags": inputs.get("domain_tags", []),
+        "strategy_used": final.get("strategy", "unified"),
+        "depths_used": {d: sum(1 for t in topics if t.get("depth") == d) for d in _CASE_DEPTHS},
+        "hops_executed": sum(len(t.get("hop_genealogy", [])) for t in topics),
+        "confidence_per_topic": {
+            t["topic"]: (t["confidence_history"][-1] if t.get("confidence_history") else None)
+            for t in topics
+        },
+        "contradiction_rate": max((t.get("contradiction_rate", 0.0) for t in topics), default=0.0),
+        "patterns_that_worked": _pattern_dict(inputs.get("patterns_that_worked")),
+        "patterns_that_failed": _pattern_dict(inputs.get("patterns_that_failed")),
+        "applied_patterns": final.get("applied_patterns", []),
+        "outcomes": {
+            "sources_processed": inputs.get("sources_processed", 0),
+            "notes_created": inputs.get("notes_created", 0),
+            "notes_updated": inputs.get("notes_updated", 0),
+            "user_decisions": final.get("user_decisions", []),
+        },
+    }

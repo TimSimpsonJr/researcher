@@ -581,3 +581,151 @@ def test_append_written_note(active_run, cli):
     assert [(n["topic"], n["path"], n["model"]) for n in written["completed"]] == [
         ("Greenville ALPR", "Projects/Alpha.md", "sonnet")
     ]
+
+
+# --- completion and pattern graduation -----------------------------------------
+
+from accumulator import Accumulator, AccumulatorEntry, load_accumulator, save_accumulator
+from learned_patterns import load_learned_patterns
+
+
+def _entry(pid="p-new"):
+    return AccumulatorEntry(
+        pattern_id=pid, name="T1 first", category="source-tier-bias", target_stage="search",
+        domain_tags=["alpr"], sessions_seen=3, sessions_since_last_seen=0,
+        status="promotion_pending", raised_bar=False, promotion_pending=True, demotion_count=0,
+        evidence=[{"case_id": "c1", "signal": "T1=8/12"}],
+        proposed_promotion_body="Prefer agency data",
+        created_at="2026-10-01T00:00:00Z", last_updated_at="2026-10-01T00:00:00Z",
+    )
+
+
+def _seed_accumulator(vault, *entries):
+    path = vault / ".researcher" / "accumulator.json"
+    save_accumulator(path, Accumulator(entries=list(entries)))
+    return path
+
+
+def test_complete_run_saves_final(active_run, cli):
+    cli("record-applied-pattern", "--pattern-id", "p1")
+    code, out, _ = cli("complete-run")
+    assert code == 0 and out["run_id"] == "r1" and out["completed_at"]
+    saved = json.loads((active_run / ".researcher" / "tmp" / "final_run.json").read_text(encoding="utf-8"))
+    assert saved == out
+    assert (_state(active_run) / "history" / "r1" / "current_run.json").is_file()
+    assert cli("check-run")[1] is None
+
+
+def test_complete_run_without_run_prints_null(vault, cli):
+    code, out, _ = cli("complete-run")
+    assert code == 0 and out is None
+    assert not (vault / ".researcher" / "tmp" / "final_run.json").exists()
+
+
+def test_write_case_record_builds_case_from_final(active_run, cli):
+    cli("record-applied-pattern", "--pattern-id", "p1")
+    cli("set-strategy", "--strategy", "unified")
+    cli("complete-run")
+    inputs = _write(active_run / "case_inputs.json", {
+        "query": "ALPR", "domain_tags": ["alpr"],
+        "patterns_that_worked": {"hop_chain": ["causal_chain"]}, "patterns_that_failed": {},
+        "sources_processed": 7, "notes_created": 2, "notes_updated": 1,
+    })
+    code, out, _ = cli("write-case-record", "--inputs-file", inputs)
+    assert code == 0
+    assert Path(out["case_path"]) == active_run.resolve() / ".researcher" / "cases" / "r1.json"
+    case = json.loads(Path(out["case_path"]).read_text(encoding="utf-8"))
+    assert case["case_id"] == "r1" and case["query"] == "ALPR" and case["strategy_used"] == "unified"
+    assert case["applied_patterns"] == ["p1"]
+    assert case["depths_used"] == {"quick": 1, "standard": 1, "deep": 0, "exhaustive": 0}
+    assert case["hops_executed"] == 0
+    assert case["confidence_per_topic"] == {"Greenville ALPR": None, "Flock Safety contracts": None}
+    assert case["patterns_that_worked"] == {"hop_chain": ["causal_chain"]}
+    assert case["outcomes"]["sources_processed"] == 7
+
+
+def test_build_case_record_defaults():
+    from state import build_case_record
+    case = build_case_record({"run_id": "r9", "topics": []}, {"query": "q"})
+    assert case["applied_patterns"] == [] and case["strategy_used"] == "unified"
+    assert case["contradiction_rate"] == 0.0 and case["outcomes"]["user_decisions"] == []
+
+
+def test_build_case_record_wraps_non_dict_patterns():
+    from state import build_case_record
+    case = build_case_record({"run_id": "r9", "topics": []}, {
+        "query": "q", "patterns_that_worked": ["T1 sources", "causal chain"],
+        "patterns_that_failed": "nothing notable",
+    })
+    assert case["patterns_that_worked"] == {"notes": ["T1 sources", "causal chain"]}
+    assert case["patterns_that_failed"] == {"notes": "nothing notable"}
+
+
+def test_write_case_record_then_analyze_with_list_patterns(active_run, cli):
+    """Regression: list-shaped patterns_that_* used to crash analyze with AttributeError."""
+    cli("complete-run")
+    inputs = _write(active_run / "case_inputs.json", {
+        "query": "ALPR", "domain_tags": ["alpr"],
+        "patterns_that_worked": ["T1 agency data", "causal chain"],
+        "patterns_that_failed": ["blog sources"],
+    })
+    case_path = cli("write-case-record", "--inputs-file", inputs)[1]["case_path"]
+    code, out, err = cli("analyze-case", "--case-path", case_path)
+    assert code == 0, err
+    assert isinstance(out["warnings"], list)
+
+
+def test_analyze_case_runs_under_lock(active_run, cli):
+    cli("complete-run")
+    inputs = _write(active_run / "case_inputs.json", {"query": "ALPR", "domain_tags": ["alpr"]})
+    case_path = cli("write-case-record", "--inputs-file", inputs)[1]["case_path"]
+    code, out, _ = cli("analyze-case", "--case-path", case_path)
+    assert code == 0
+    assert set(out) == {"promotion_candidates", "contradictions", "warnings",
+                        "score_updates_applied", "demotions_applied"}
+    assert not (active_run / ".researcher" / ".lock").exists()
+
+
+def test_promote_pattern_moves_entry(vault, cli):
+    acc_path = _seed_accumulator(vault, _entry())
+    code, out, _ = cli("promote-pattern", "--pattern-id", "p-new")
+    assert code == 0 and out == {"status": "promoted"}
+    lp, warnings = load_learned_patterns(vault / ".researcher" / "learned_patterns.md")
+    assert warnings == [] and [p.id for p in lp.patterns] == ["p-new"]
+    assert lp.patterns[0].body == "Prefer agency data"
+    assert load_accumulator(acc_path)[0].entries == []
+    assert not (vault / ".researcher" / ".lock").exists()
+
+
+def test_promote_unknown_pattern_fails(vault, cli):
+    _seed_accumulator(vault)
+    code, _, err = cli("promote-pattern", "--pattern-id", "nope")
+    assert code == 1 and "nope" in err
+
+
+def test_reject_and_hold(vault, cli):
+    acc_path = _seed_accumulator(vault, _entry("p1"), _entry("p2"))
+    assert cli("reject-pattern", "--pattern-id", "p1")[1] == {"status": "rejected"}
+    assert cli("hold-pattern", "--pattern-id", "p2")[1] == {"status": "held"}
+    by_id = {e.pattern_id: e for e in load_accumulator(acc_path)[0].entries}
+    assert by_id["p1"].status == "rejected"
+    assert by_id["p2"].status == "hold" and by_id["p2"].promotion_pending is False
+
+
+@pytest.mark.parametrize("command", ["promote-pattern", "reject-pattern", "hold-pattern"])
+def test_graduation_refuses_corrupt_accumulator(vault, cli, command):
+    acc_path = vault / ".researcher" / "accumulator.json"
+    acc_path.write_text("{not json", encoding="utf-8")
+    code, out, err = cli(command, "--pattern-id", "p1")
+    assert code == 0 and out == {"status": "aborted"}
+    assert "BRANCH_ABORTED" in err
+    assert acc_path.read_text(encoding="utf-8") == "{not json"
+
+
+def test_promote_refuses_corrupt_learned_patterns(vault, cli):
+    _seed_accumulator(vault, _entry())
+    lp_path = vault / ".researcher" / "learned_patterns.md"
+    lp_path.write_text("---\nversion: 99\n---\n", encoding="utf-8")
+    code, out, err = cli("promote-pattern", "--pattern-id", "p-new")
+    assert code == 0 and out == {"status": "aborted"} and "learned_patterns" in err
+    assert lp_path.read_text(encoding="utf-8") == "---\nversion: 99\n---\n"

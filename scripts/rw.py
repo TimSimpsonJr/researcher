@@ -20,6 +20,7 @@ from pathlib import Path
 import config_manager
 import migrate as migrate_mod
 import vault_index
+from case_analyzer import analyze, hold_candidate, promote_candidate, reject_candidate
 from confidence import compute_confidence
 from learned_patterns import filter_by_topic_text, group_by_stage, load_learned_patterns
 from detect_tier import (
@@ -37,12 +38,15 @@ from detect_tier import (
 from state import (
     LockTimeoutError,
     abandon_run,
+    acquire_state_lock,
     add_seen_urls,
     aggregate_fetch_results,
     aggregate_hop_summaries,
     append_written_note,
     apply_hop_decision,
     apply_replan_readmit,
+    build_case_record,
+    complete_run,
     create_run,
     init_topic,
     is_stale_run,
@@ -55,6 +59,7 @@ from state import (
     save_stage_output,
     save_state,
     update_stage,
+    write_case_record,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -362,6 +367,81 @@ def cmd_append_written_note(args):
     _out({"path": args.path})
 
 
+# --- completion and pattern graduation ----------------------------------------
+
+def _final_path(args) -> Path:
+    return _researcher_dir(args) / "tmp" / "final_run.json"
+
+
+def cmd_complete_run(args):
+    final = complete_run(_state_dir(args))
+    if final is not None:
+        path = _final_path(args)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(final, indent=2, ensure_ascii=False), encoding="utf-8")
+    _out(final)
+
+
+def cmd_write_case_record(args):
+    final = _read_json(args.final_file or _final_path(args))
+    case = build_case_record(final, _read_json(args.inputs_file))
+    cases_dir = _researcher_dir(args) / "cases"
+    write_case_record(cases_dir, case)
+    _out({"case_path": str(cases_dir / f"{case['case_id']}.json")})
+
+
+def cmd_analyze_case(args):
+    rd = _researcher_dir(args)
+    with acquire_state_lock(rd):
+        result = analyze(
+            case_path=Path(args.case_path),
+            accumulator_path=rd / "accumulator.json",
+            learned_patterns_path=rd / "learned_patterns.md",
+            cases_dir=rd / "cases",
+        )
+    _out({
+        "promotion_candidates": [
+            {"pattern_id": c.pattern_id, "name": c.name,
+             "proposed_promotion_body": c.proposed_promotion_body, "evidence": c.evidence}
+            for c in result.promotion_candidates
+        ],
+        "contradictions": result.contradictions,
+        "warnings": result.warnings,
+        "score_updates_applied": result.score_updates_applied,
+        "demotions_applied": result.demotions_applied,
+    })
+
+
+def _report_branch(reason: str | None, done: str) -> None:
+    if reason:
+        print(f"BRANCH_ABORTED: {reason}", file=sys.stderr)
+        _out({"status": "aborted"})
+    else:
+        _out({"status": done})
+
+
+def cmd_promote_pattern(args):
+    rd = _researcher_dir(args)
+    with acquire_state_lock(rd):
+        reason = promote_candidate(args.pattern_id, accumulator_path=rd / "accumulator.json",
+                                   learned_patterns_path=rd / "learned_patterns.md")
+    _report_branch(reason, "promoted")
+
+
+def cmd_reject_pattern(args):
+    rd = _researcher_dir(args)
+    with acquire_state_lock(rd):
+        reason = reject_candidate(args.pattern_id, accumulator_path=rd / "accumulator.json")
+    _report_branch(reason, "rejected")
+
+
+def cmd_hold_pattern(args):
+    rd = _researcher_dir(args)
+    with acquire_state_lock(rd):
+        reason = hold_candidate(args.pattern_id, accumulator_path=rd / "accumulator.json")
+    _report_branch(reason, "held")
+
+
 # --- entry point --------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -461,6 +541,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--topic", required=True)
     p.add_argument("--path", required=True)
     p.add_argument("--model", required=True)
+    add("complete-run", cmd_complete_run, "archive the run; print and save the final run dict")
+    p = add("write-case-record", cmd_write_case_record, "Stage 10c case record from final + inputs")
+    p.add_argument("--inputs-file", required=True)
+    p.add_argument("--final-file", help="default: VAULT/.researcher/tmp/final_run.json")
+    p = add("analyze-case", cmd_analyze_case, "Stage 10d case analyzer, under the state lock")
+    p.add_argument("--case-path", required=True)
+    for name, func, help_text in (
+        ("promote-pattern", cmd_promote_pattern, "Stage 10e: promote a candidate pattern"),
+        ("reject-pattern", cmd_reject_pattern, "Stage 10e: permanently reject a candidate"),
+        ("hold-pattern", cmd_hold_pattern, "Stage 10e: hold a candidate for later"),
+    ):
+        p = add(name, func, help_text)
+        p.add_argument("--pattern-id", required=True)
     return parser
 
 
