@@ -2,14 +2,14 @@
 
 ## Stack
 
-Python 3.10+ · requests, pymupdf, python-docx, rich, PyYAML · pytest + pytest-mock (offline) · Claude Code plugin v3.2 "researcher" (Sonnet orchestrator + Sonnet topic-resolver/hop-planner + Haiku for search/classify/summarize/discover/case-analyzer) · Node >=18 (node:test) for batch JS twins · SQLite FTS5 vault index · optional Ollama (mid/full tier) + SearXNG, yt-dlp, Whisper, Playwright (full tier)
+Python 3.12 (uv) · requests, pymupdf, python-docx, rich, PyYAML · pytest + pytest-mock (offline) · Claude Code plugin v3.2 "researcher" (Sonnet orchestrator + Sonnet topic-resolver/hop-planner + Haiku for search/classify/summarize/discover/case-analyzer) · Node >=18 (node:test) for batch JS twins · SQLite FTS5 vault index · optional Ollama (mid/full tier) + SearXNG, yt-dlp, Whisper, Playwright (full tier)
 
 ## Structure
 
 ```
 .claude-plugin/plugin.json             # Plugin manifest — name "researcher", v3.2.0, librarian dependency
 .claude-plugin/marketplace.json        # Single-plugin marketplace pointer (./ source)
-requirements.txt                       # Python deps
+pyproject.toml / uv.lock / .python-version  # uv-managed env: Python 3.12 + locked deps; dev group = pytest
 
 skills/
   researcher/SKILL.md                  # Sonnet orchestrator — inline pipeline (Stages 0-10) + batch router (Stage 3.5) + batch fan-out (Stage 4B)

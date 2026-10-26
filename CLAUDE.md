@@ -35,7 +35,7 @@ After each run, Stage 10d's case analyzer scans recent case records for recurrin
 
 ## Working on this project
 
-- Tests: `pytest tests/ -v` — all tests run offline (no API key needed)
+- Tests: `uv run --project . pytest` — all tests run offline (no API key needed). The env is `pyproject.toml` + `uv.lock` (`uv sync` to set up).
 - Config is generated per-vault by `researcher-setup` and stored in `{vault}/.researcher/config.json`
 - Skills reference `{{VAULT_ROOT}}` and `{{REPO_ROOT}}` placeholders filled during plugin setup
 - The `.claude/` and `docs/` directories are gitignored (force-add specific docs files when needed)
