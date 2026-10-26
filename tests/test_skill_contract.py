@@ -15,7 +15,13 @@ case-based pattern learning:
   accumulator_* warnings in addition to learned_patterns_* warnings.
 """
 
+import argparse
+import re
 from pathlib import Path
+
+import pytest
+
+import rw
 
 
 _SKILL_MD = Path(__file__).parent.parent / "skills" / "researcher" / "SKILL.md"
@@ -61,3 +67,91 @@ def test_skill_md_stage_10e_branches_use_guarded_commands():
     for cmd in ("promote-pattern", "reject-pattern", "hold-pattern"):
         assert f'rw.py" {cmd} --pattern-id' in text, f"Stage 10e must call rw.py {cmd}"
     assert "BRANCH_ABORTED" in text
+
+
+_REPO = Path(__file__).parent.parent
+_SCANNED = sorted([
+    *(_REPO / "skills").glob("*/SKILL.md"),
+    *(_REPO / "agents").glob("*.md"),
+    *(_REPO / "lib").rglob("*.js"),
+    *(_REPO / ".claude" / "workflows").glob("*.js"),
+])
+_PLACEHOLDERS = ("{{REPO_ROOT}}", "{{VAULT_ROOT}}", "{{PYTHON_PATH}}", "{{SCRIPTS_DIR}}")
+# A python/python3 command: followed by a flag, a quote, or a .py path.
+_BARE_PYTHON = re.compile(r"(?<![\w./-])python3?(?:\.exe)?[ \t]+(?:-|\"|'|\S+\.py\b)")
+_RW_CALL = re.compile(r"rw\.py\"[ \t]+([a-z][a-z-]*)")
+# A real uv invocation: `uv run ...` / `uv sync ...` at a command position.
+_UV_CALL = re.compile(r"(?<![\w./-])uv[ \t]+(?:run|sync)\b[^\n]*")
+
+
+def _bare_python_hits(text: str) -> list[str]:
+    return [line for line in text.splitlines() if _BARE_PYTHON.search(line)]
+
+
+def _unfrozen_uv_hits(text: str) -> list[str]:
+    return [m.group(0) for m in _UV_CALL.finditer(text) if "--frozen" not in m.group(0)]
+
+
+def _rw_subcommands() -> set[str]:
+    parser = rw.build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    return set(sub.choices)
+
+
+def _rel(p: Path) -> str:
+    return p.relative_to(_REPO).as_posix()
+
+
+def test_scanner_catches_known_bad_lines():
+    bad = [
+        'python -c "import sys"',
+        'python "SCRIPTS/fetch_and_clean.py" --input x',
+        '  python3 -m pip install yt-dlp',
+        'Run `python migrate.py --vault v`',
+    ]
+    good = [
+        "```python",
+        "researcher Python scripts",
+        'uv run --frozen --project "REPO" "REPO/scripts/rw.py" locate',
+        "neither `python` nor the scripts dir",
+    ]
+    assert all(_bare_python_hits(line) for line in bad)
+    assert not any(_bare_python_hits(line) for line in good)
+    assert _unfrozen_uv_hits('uv run --project "R" "R/scripts/rw.py" locate')
+    assert _unfrozen_uv_hits('uv sync --project "R"')
+    assert not _unfrozen_uv_hits('uv run --frozen --project "R" "R/scripts/rw.py" locate')
+    assert not _unfrozen_uv_hits("uv --version")
+
+
+def test_scanned_files_present():
+    names = {p.name for p in _SCANNED}
+    assert {"SKILL.md", "hop-planner.md", "fetch-summarize-runner.md", "research-batch.js"} <= names
+
+
+@pytest.mark.parametrize("path", _SCANNED, ids=_rel)
+def test_no_inline_or_bare_python(path):
+    text = path.read_text(encoding="utf-8")
+    assert "python -c" not in text and "python3 -c" not in text
+    assert _bare_python_hits(text) == []
+    assert "python_path" not in text and "sys.executable" not in text
+
+
+@pytest.mark.parametrize("path", _SCANNED, ids=_rel)
+def test_uv_calls_are_frozen(path):
+    assert _unfrozen_uv_hits(path.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize("path", _SCANNED, ids=_rel)
+def test_no_unfilled_placeholders(path):
+    text = path.read_text(encoding="utf-8")
+    assert [p for p in _PLACEHOLDERS if p in text] == []
+
+
+def test_every_rw_subcommand_referenced_exists():
+    known = _rw_subcommands()
+    used: dict[str, str] = {}
+    for path in _SCANNED:
+        for name in _RW_CALL.findall(path.read_text(encoding="utf-8")):
+            used.setdefault(name, _rel(path))
+    assert used, "expected rw.py calls in skills/agents"
+    assert {n: f for n, f in used.items() if n not in known} == {}

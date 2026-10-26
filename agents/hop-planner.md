@@ -42,10 +42,10 @@ You will receive:
 
 ## Step 1: Compute Confidence
 
-Call the confidence formula on `sources_so_far`. The orchestrator substitutes the `{repo}`, `{sources_file}`, and `{depth}` placeholders before dispatching the prompt — treat them as filled in by the time you run this:
+Call the confidence formula on `sources_so_far`. The orchestrator substitutes the `{repo}`, `{sources_so_far}`, and `{depth}` placeholders before dispatching the prompt — treat them as filled in by the time you run this:
 
 ```bash
-uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" compute-confidence --sources-file "{sources_file}" --depth {depth}
+uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" compute-confidence --sources-file "{sources_so_far}" --depth {depth}
 ```
 
 Record the resulting score.

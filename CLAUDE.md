@@ -37,10 +37,11 @@ After each run, Stage 10d's case analyzer scans recent case records for recurrin
 
 - Tests: `uv run --project . pytest` — all tests run offline (no API key needed). The env is `pyproject.toml` + `uv.lock` (`uv sync` to set up).
 - Config is generated per-vault by `researcher-setup` and stored in `{vault}/.researcher/config.json`
-- Skills reference `{{VAULT_ROOT}}` and `{{REPO_ROOT}}` placeholders filled during plugin setup
+- Skills find the plugin root from the skill's announced base directory (two levels up) and the vault with `rw.py locate`; every Python call is one line: `uv run --frozen --project "REPO" "REPO/scripts/rw.py" <subcommand>`
 - The `.claude/` and `docs/` directories are gitignored (force-add specific docs files when needed)
 
 ## Don't
 
 - Don't add direct Claude API calls to skill files or scripts — use subagents (Task tool) or Ollama
 - Don't put vault rules in individual prompt templates — they go in `vault_rules.txt` and are auto-included
+- Don't put inline Python (`python -c`, heredocs, bare `python` calls) in skills, agents or the workflow — add an `rw.py` subcommand that calls a module function (`tests/test_skill_contract.py` enforces this)

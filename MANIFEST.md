@@ -63,4 +63,5 @@ docs/plans/, docs/handoffs/            # Design docs (gitignored except force-ad
 - `research-batch.js` inlines `lib/confidence.js` + `lib/schemas.js` (exports stripped); `test/contract.test.js` guards the inline-sync + the Workflow launch contract; `tools/reinline-workflow.mjs` refreshes the blocks.
 - `fetch-summarize-runner` wraps `fetch_and_clean.py` + `summarize.py` (the workflow has no Bash/Python) via `uv run --frozen --project <repo>`; the workflow passes `repo` in its config.
 - **v3.1 case learning:** `case_analyzer.analyze()` (Stage 10d) wires `pattern_detection.py` + `accumulator.py` + `learned_patterns.py` + `score_updates.py`; state at `{vault}/.researcher/`, serialized by `state.acquire_state_lock`.
+- Skills and agents run Python only as one-line `uv run --frozen --project "REPO" "REPO/scripts/rw.py" <cmd>` calls; `tests/test_skill_contract.py` fails on inline/bare Python, unfrozen uv calls, unfilled placeholders, or unknown rw.py subcommands.
 - `migrate.migrate_vault_dir` runs at Stage 0a — one-time `.research-workflow/`->`.researcher/` rename for existing vaults.
