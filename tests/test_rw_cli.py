@@ -534,6 +534,38 @@ def test_aggregate_fetch_results_later_hop_wins(active_run, cli):
     assert not (sd / "fetch_results_aggregated.tmp").exists()
 
 
+def test_aggregate_summaries_dedupes_by_topic_url_title(active_run, cli):
+    sd = _state(active_run)
+    _write(sd / "summaries_hop1_alpr.json", {"items": [
+        {"url": "u", "title": "A", "v": 1}, {"url": "shared", "title": "X"},
+        {"url": "shared", "title": "Y"}]})
+    _write(sd / "summaries_hop3_alpr.json", {"items": [{"url": "u", "title": "A", "v": 3}]})
+    _write(sd / "summaries_hop1_flock.json", {"items": [{"url": "u", "title": "A", "v": 9}]})
+    cli("aggregate-summaries", "--project", "P")
+    items = json.loads((sd / "summaries.json").read_text(encoding="utf-8"))["items"]
+    assert len(items) == 4  # alpr/u once, both shared items, flock/u kept separate
+    assert [i["v"] for i in items if i["url"] == "u"] == [3, 9]
+    assert {i["title"] for i in items if i["url"] == "shared"} == {"X", "Y"}
+
+
+def test_aggregate_hop_order_is_numeric(active_run, cli):
+    sd = _state(active_run)
+    _write(sd / "summaries_hop2.json", {"items": [{"url": "u", "title": "t", "v": 2}]})
+    _write(sd / "summaries_hop10.json", {"items": [{"url": "u", "title": "t", "v": 10}]})
+    _write(sd / "fetch_results_hop2.json", {"fetched": [{"url": "u", "content": "two"}]})
+    _write(sd / "fetch_results_hop10.json", {"fetched": [{"url": "u", "content": "ten"}]})
+    cli("aggregate-summaries", "--project", "P")
+    cli("aggregate-fetch-results")
+    assert json.loads((sd / "summaries.json").read_text(encoding="utf-8"))["items"][0]["v"] == 10
+    agg = json.loads((sd / "fetch_results_aggregated.json").read_text(encoding="utf-8"))
+    assert agg["by_url"]["u"]["content"] == "ten"
+
+
+def test_record_user_decision_without_run_fails(vault, cli):
+    code, _, err = cli("record-user-decision", "--decision", "continue")
+    assert code == 1 and "no active run" in err
+
+
 def test_check_mtime(active_run, cli):
     note = active_run / "Projects" / "Alpha.md"
     future = time.time() + 60

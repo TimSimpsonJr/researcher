@@ -324,8 +324,10 @@ def cmd_apply_replan_readmit(args):
 
 
 def cmd_record_user_decision(args):
+    sd = _state_dir(args)
+    _active_run(sd)
     details = {} if args.confidence is None else {"confidence": args.confidence}
-    record_user_decision(_state_dir(args), decision=args.decision, **details)
+    record_user_decision(sd, decision=args.decision, **details)
     _out({"decision": args.decision})
 
 

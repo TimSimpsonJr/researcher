@@ -8,6 +8,7 @@ restart, and abandon flows. State lives in the vault at
 
 import json
 import os
+import re
 import shutil
 import sys
 from contextlib import contextmanager
@@ -484,12 +485,26 @@ def quality_gate(run: dict) -> dict:
     }
 
 
+_HOP_RE = re.compile(r"_hop(\d+)([a-z]?)(?:_(.*))?$")
+
+
+def _hop_files(state_dir: Path, prefix: str) -> list[Path]:
+    """<prefix>_hop*.json in numeric hop order (hop2 before hop10, hop1 before hop1b)."""
+    def key(p: Path):
+        m = _HOP_RE.search(p.stem)
+        return (int(m.group(1)), m.group(2), p.name) if m else (0, "", p.name)
+    return sorted(state_dir.glob(f"{prefix}_hop*.json"), key=key)
+
+
 def aggregate_hop_summaries(state_dir: Path, project: str) -> dict:
     """Stage 6a: merge every summaries_hop*.json's items into summaries.json."""
-    items: list = []
-    for hop_file in sorted(state_dir.glob("summaries_hop*.json")):
-        items.extend(json.loads(hop_file.read_text(encoding="utf-8")).get("items", []))
-    combined = {"topic": project, "items": items}
+    seen: dict = {}  # insertion order = first-seen; later hops overwrite the value
+    for hop_file in _hop_files(state_dir, "summaries"):
+        m = _HOP_RE.search(hop_file.stem)
+        key = (m.group(3) or "") if m else ""
+        for item in json.loads(hop_file.read_text(encoding="utf-8")).get("items", []):
+            seen[(key, item.get("url"), item.get("title"))] = item
+    combined = {"topic": project, "items": list(seen.values())}
     save_stage_output(state_dir, "summaries", combined)
     return combined
 
@@ -499,7 +514,7 @@ def aggregate_fetch_results(state_dir: Path) -> dict:
     as {fetched, by_url}. Later hops win on URL collisions. Written atomically
     (temp + rename) so a crash never leaves a half-written file for resume."""
     by_url: dict = {}
-    for hop_file in sorted(state_dir.glob("fetch_results_hop*.json")):
+    for hop_file in _hop_files(state_dir, "fetch_results"):
         for entry in json.loads(hop_file.read_text(encoding="utf-8")).get("fetched", []):
             by_url[entry["url"]] = entry
     combined = {"fetched": list(by_url.values()), "by_url": by_url}
