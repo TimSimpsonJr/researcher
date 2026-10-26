@@ -354,15 +354,15 @@ Write the config to `VAULT_ROOT/.researcher/setup_config.json` with the Write to
 }
 ```
 
+Replace all placeholders with the actual values collected during the wizard. Use the detected values from Step 2 for `inbox` (default "Inbox" if an "Inbox" folder exists, otherwise the first folder that looks like an inbox), `assets`, `moc_pattern`, `tag_format`, and `frontmatter_fields`.
+
 Use JSON values: `true` / `false`, `null` for none, a JSON list for `frontmatter_fields`. Write `vault_root` with forward slashes (or doubled backslashes) so the JSON stays valid. Then save it:
 
 ```bash
 uv run --frozen --project "REPO" "REPO/scripts/rw.py" save-config --vault "VAULT_ROOT" --config-file "VAULT_ROOT/.researcher/setup_config.json"
 ```
 
-It writes `VAULT_ROOT/.researcher/config.json` and prints the saved config.
-
-Replace all placeholders with the actual values collected during the wizard. Use the detected values from Step 2 for `inbox` (default "Inbox" if an "Inbox" folder exists, otherwise the first folder that looks like an inbox), `assets`, `moc_pattern`, `tag_format`, and `frontmatter_fields`.
+It writes `VAULT_ROOT/.researcher/config.json` and prints the saved config. Once saved, `.researcher/setup_config.json` can be deleted.
 
 ### 9c. Generate vault_rules.txt
 
