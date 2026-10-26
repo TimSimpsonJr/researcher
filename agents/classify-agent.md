@@ -38,7 +38,7 @@ You will receive a `summaries` JSON object with this structure:
 
 Additional context:
 - `vault_root` -- absolute path to the Obsidian vault
-- `scripts_dir` -- absolute path to the researcher scripts directory
+- `repo` -- absolute path to the researcher plugin root
 - `shared_context_files` -- vault-relative paths to notes the user flagged as context
 
 ---
@@ -48,7 +48,7 @@ Additional context:
 Use Bash to query the vault index for notes related to the batch:
 
 ```bash
-python -c "import sys; sys.path.insert(0, '{scripts_dir}'); from vault_index import search; from pathlib import Path; import json; print(json.dumps(search(Path('{vault_root}'), 'query terms'), indent=2))"
+uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" vault-search --vault "{vault_root}" --query "query terms"
 ```
 
 Run 2-4 queries:

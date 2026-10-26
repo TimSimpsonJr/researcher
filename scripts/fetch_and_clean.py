@@ -293,9 +293,10 @@ def process_urls(
         try:
             content, title, method = fetch_url(url, jina_api_key)
             last_fetch_time = time.monotonic()
-            content = content[:MAX_CONTENT_CHARS]
             now = datetime.now(timezone.utc).isoformat()
 
+            # Cache the full text; MAX_CONTENT_CHARS caps output only, so a
+            # later run with a higher cap still gets the whole document.
             save_cache(cache_dir, cache_key, {
                 "url": url,
                 "title": title,
@@ -303,6 +304,7 @@ def process_urls(
                 "fetch_method": method,
                 "fetched_at": now,
             })
+            content = content[:MAX_CONTENT_CHARS]
 
             fetched.append({
                 "url": url,
@@ -347,12 +349,12 @@ def _fetch_single(url_item: dict, cache_dir: Path, ttl_days: int,
 
     try:
         content, title, method = fetch_url(url, jina_api_key)
-        content = content[:MAX_CONTENT_CHARS]
         now = datetime.now(timezone.utc).isoformat()
-        save_cache(cache_dir, cache_key, {
+        save_cache(cache_dir, cache_key, {  # full text; truncate output only
             "url": url, "title": title, "content": content,
             "fetch_method": method, "fetched_at": now,
         })
+        content = content[:MAX_CONTENT_CHARS]
         return {
             "url": url, "title": title, "content": content,
             "fetch_method": method, "cache_hit": False,

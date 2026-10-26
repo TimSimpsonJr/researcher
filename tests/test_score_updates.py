@@ -4,7 +4,7 @@ def test_compute_run_outcome_win():
     case = {
         "confidence_per_topic": {"t1": 0.82, "t2": 0.78},
         "contradiction_rate": 0.15,
-        "outcomes": {"user_decisions": [{"stage": "5", "choice": "accept"}]},
+        "outcomes": {"user_decisions": [{"decision": "continue", "at": "2026-10-26T00:00:00+00:00"}]},
         "depths_used": {"standard": 2},
     }
     assert compute_run_outcome(case, confidence_target=0.75) == "W"
@@ -27,8 +27,24 @@ def test_compute_run_outcome_loss_user_abandoned():
     case = {
         "confidence_per_topic": {"t1": 0.82},
         "contradiction_rate": 0.1,
-        "outcomes": {"user_decisions": [{"stage": "5", "choice": "abandon"}]},
+        "outcomes": {"user_decisions": [{"decision": "abandon", "at": "2026-10-26T00:00:00+00:00"}]},
     }
+    assert compute_run_outcome(case, confidence_target=0.75) == "L"
+
+
+def test_compute_run_outcome_reads_decisions_as_state_writes_them(tmp_path):
+    """The abandon check must match the entry shape record_user_decision writes
+    (key "decision"), traced through build_case_record. A fixture-only test used
+    the key "choice", which the writer never produces, so abandon never scored."""
+    from score_updates import compute_run_outcome
+    from state import create_run, init_topic, load_run, save_state, record_user_decision, build_case_record
+    create_run(tmp_path, "r1", "full")
+    run = load_run(tmp_path)
+    run["topics"] = [init_topic("t1", "web_research", "standard")]
+    run["topics"][0]["confidence_history"] = [0.9]
+    save_state(tmp_path, run)
+    record_user_decision(tmp_path, decision="abandon", confidence=0.9)
+    case = build_case_record(load_run(tmp_path), {"query": "q"})
     assert compute_run_outcome(case, confidence_target=0.75) == "L"
 
 

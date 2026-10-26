@@ -31,7 +31,7 @@ def compute_run_outcome(case: dict, *, confidence_target: float = 0.75) -> str:
 
     decisions = (case.get("outcomes", {}) or {}).get("user_decisions", []) or []
     for d in decisions:
-        if d.get("choice") == "abandon":
+        if d.get("decision") == "abandon":  # key written by state.record_user_decision
             return "L"
     return "W"
 

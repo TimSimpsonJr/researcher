@@ -9,30 +9,36 @@ these fields will fail the contract test.
 
 These tests are regressions for the codex impl-review findings on v3.1.0
 case-based pattern learning:
-- score-loop cluster: Stage 10c case dict must include `applied_patterns`
+- score-loop cluster: the Stage 10c case record must include `applied_patterns`
+  (now built by state.build_case_record behind rw.py write-case-record)
 - graduation-write-path cluster: Stage 10d/10e must defend against
   accumulator_* warnings in addition to learned_patterns_* warnings.
 """
 
+import argparse
+import re
 from pathlib import Path
+
+import pytest
+
+import rw
 
 
 _SKILL_MD = Path(__file__).parent.parent / "skills" / "researcher" / "SKILL.md"
 
 
-def test_skill_md_stage_10c_includes_applied_patterns_in_case_dict():
-    """SKILL.md Stage 10c case-dict assembly must include 'applied_patterns' field.
-
-    Without it, the score/demotion loop in Stage 10d's analyzer is a no-op in
-    production (case.get('applied_patterns', []) returns []). Regression for
+def test_skill_md_stage_10c_case_record_carries_applied_patterns():
+    """Stage 10c builds the case via rw.py write-case-record ->
+    state.build_case_record, which must carry the run's applied_patterns.
+    Without it the Stage 10d score/demotion loop is a no-op in production
+    (case.get('applied_patterns', []) returns []). Regression for
     codex-impl-review finding score-loop cluster.
     """
+    from state import build_case_record
     text = _SKILL_MD.read_text(encoding="utf-8")
-    # Find the Stage 10c block — anchor on the write_case_record reference
-    assert "write_case_record" in text, "Stage 10c must reference write_case_record"
-    # The case dict assembly must include applied_patterns sourced from final
-    assert "'applied_patterns':" in text, \
-        "Stage 10c case dict must include 'applied_patterns' field"
+    assert "write-case-record" in text, "Stage 10c must call rw.py write-case-record"
+    case = build_case_record({"run_id": "r1", "topics": [], "applied_patterns": ["p1"]}, {"query": "q"})
+    assert case["applied_patterns"] == ["p1"]
 
 
 def test_skill_md_stage_10d_gates_on_accumulator_warnings():
@@ -51,14 +57,127 @@ def test_skill_md_stage_10d_gates_on_accumulator_warnings():
     assert "accumulator_" in context, "gate must mention accumulator_* warnings"
 
 
-def test_skill_md_stage_10e_all_branches_check_acc_warnings():
-    """All three Stage 10e branches (Promote, Reject, Hold) must check
-    acc_warnings before saving the accumulator. Without this defense-in-depth,
-    a corrupt accumulator could be overwritten with empty content.
+def test_skill_md_stage_10e_branches_use_guarded_commands():
+    """All three Stage 10e branches (Promote, Reject, Hold) run rw.py
+    promote-/reject-/hold-pattern, whose case_analyzer functions refuse to
+    save over a corrupt store (BRANCH_ABORTED). The refusal itself is
+    tested in tests/test_rw_cli.py.
     """
     text = _SKILL_MD.read_text(encoding="utf-8")
-    # Each branch has its own ```bash block; each block must mention acc_warnings handling
-    # Heuristic: count "BRANCH_ABORTED" occurrences — should be >= 3 (one per branch)
-    aborted_count = text.count("BRANCH_ABORTED")
-    assert aborted_count >= 3, \
-        f"expected acc_warnings check in all 3 Stage 10e branches, found {aborted_count} BRANCH_ABORTED markers"
+    for cmd in ("promote-pattern", "reject-pattern", "hold-pattern"):
+        assert f'rw.py" {cmd} --pattern-id' in text, f"Stage 10e must call rw.py {cmd}"
+    assert "BRANCH_ABORTED" in text
+
+
+_REPO = Path(__file__).parent.parent
+_SCANNED = sorted([
+    *(_REPO / "skills").glob("*/SKILL.md"),
+    *(_REPO / "agents").glob("*.md"),
+    *(_REPO / "lib").rglob("*.js"),
+    *(_REPO / ".claude" / "workflows").glob("*.js"),
+])
+_PLACEHOLDERS = ("{{REPO_ROOT}}", "{{VAULT_ROOT}}", "{{PYTHON_PATH}}", "{{SCRIPTS_DIR}}")
+# A python/python3 command: followed by a flag, a quote, or a .py path.
+_BARE_PYTHON = re.compile(r"(?<![\w./-])python3?(?:\.exe)?[ \t]+(?:-|\"|'|\S+\.py\b)")
+_RW_CALL = re.compile(r"rw\.py[\"']?[ \t]+([a-z][a-z-]*)")
+# A real uv invocation: `uv run ...` / `uv sync ...` at a command position.
+_UV_CALL = re.compile(r"(?<![\w./-])uv[ \t]+(?:run|sync)\b")
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\|")
+
+
+def _bare_python_hits(text: str) -> list[str]:
+    return [line for line in text.splitlines() if _BARE_PYTHON.search(line)]
+
+
+def _unfrozen_uv_hits(text: str) -> list[str]:
+    hits = []
+    for line in text.splitlines():
+        for seg in _SEGMENT_SPLIT.split(line):
+            m = _UV_CALL.search(seg)
+            if m and "--frozen" not in seg[m.start():]:
+                hits.append(seg.strip())
+    return hits
+
+
+def _rw_names(text: str) -> list[str]:
+    # Only uv invocations (a segment split on shell operators and backticks that
+    # holds `uv run`); skips prose like "rw.py cannot find it" on the same line.
+    return [
+        n
+        for line in text.splitlines()
+        for seg in re.split(r"&&|\|\||;|\||`", line)
+        if _UV_CALL.search(seg)
+        for n in _RW_CALL.findall(seg)
+    ]
+
+
+def _rw_subcommands() -> set[str]:
+    parser = rw.build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    return set(sub.choices)
+
+
+def _rel(p: Path) -> str:
+    return p.relative_to(_REPO).as_posix()
+
+
+def test_scanner_catches_known_bad_lines():
+    bad = [
+        'python -c "import sys"',
+        'python "SCRIPTS/fetch_and_clean.py" --input x',
+        '  python3 -m pip install yt-dlp',
+        'Run `python migrate.py --vault v`',
+    ]
+    good = [
+        "```python",
+        "researcher Python scripts",
+        'uv run --frozen --project "REPO" "REPO/scripts/rw.py" locate',
+        "neither `python` nor the scripts dir",
+    ]
+    assert all(_bare_python_hits(line) for line in bad)
+    assert not any(_bare_python_hits(line) for line in good)
+    assert _unfrozen_uv_hits('uv run --project "R" "R/scripts/rw.py" locate')
+    assert _unfrozen_uv_hits('uv sync --project "R"')
+    assert not _unfrozen_uv_hits('uv run --frozen --project "R" "R/scripts/rw.py" locate')
+    assert not _unfrozen_uv_hits("uv --version")
+    assert _unfrozen_uv_hits('uv sync --project R && uv run --frozen --project R x.py')
+    assert _unfrozen_uv_hits('uv run --frozen --project R x.py; uv run --project R y.py')
+    assert not _unfrozen_uv_hits('uv sync --frozen --project R && uv run --frozen x.py | cat')
+    assert _rw_names('uv run --frozen --project R R/scripts/rw.py bogus-cmd') == ["bogus-cmd"]
+    assert _rw_names("uv run --frozen --project R 'R/scripts/rw.py' bogus-cmd") == ["bogus-cmd"]
+    assert _rw_names('uv run --frozen --project R "R/scripts/rw.py" locate') == ["locate"]
+    assert _rw_names("so rw.py cannot find it") == []
+
+
+def test_scanned_files_present():
+    names = {p.name for p in _SCANNED}
+    assert {"SKILL.md", "hop-planner.md", "fetch-summarize-runner.md", "research-batch.js"} <= names
+
+
+@pytest.mark.parametrize("path", _SCANNED, ids=_rel)
+def test_no_inline_or_bare_python(path):
+    text = path.read_text(encoding="utf-8")
+    assert "python -c" not in text and "python3 -c" not in text
+    assert _bare_python_hits(text) == []
+    assert "python_path" not in text and "sys.executable" not in text
+
+
+@pytest.mark.parametrize("path", _SCANNED, ids=_rel)
+def test_uv_calls_are_frozen(path):
+    assert _unfrozen_uv_hits(path.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize("path", _SCANNED, ids=_rel)
+def test_no_unfilled_placeholders(path):
+    text = path.read_text(encoding="utf-8")
+    assert [p for p in _PLACEHOLDERS if p in text] == []
+
+
+def test_every_rw_subcommand_referenced_exists():
+    known = _rw_subcommands()
+    used: dict[str, str] = {}
+    for path in _SCANNED:
+        for name in _rw_names(path.read_text(encoding="utf-8")):
+            used.setdefault(name, _rel(path))
+    assert used, "expected rw.py calls in skills/agents"
+    assert {n: f for n, f in used.items() if n not in known} == {}

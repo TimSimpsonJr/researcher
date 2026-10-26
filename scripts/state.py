@@ -8,6 +8,7 @@ restart, and abandon flows. State lives in the vault at
 
 import json
 import os
+import re
 import shutil
 import sys
 from contextlib import contextmanager
@@ -441,6 +442,101 @@ def apply_hop_decision(
     save_state(state_dir, run)
 
 
+QUALITY_MAX_CONTRADICTION = 0.3
+
+
+def _latest_confidence(topic: dict) -> float:
+    return topic["confidence_history"][-1] if topic["confidence_history"] else 0.0
+
+
+def topic_passes(topic: dict) -> bool:
+    """Stage 5a: latest confidence >= the depth's confidence_target AND
+    contradiction_rate <= 0.3. A topic with no confidence yet scores 0.0."""
+    target = get_depth_profile(topic["depth"])["confidence_target"]
+    return (_latest_confidence(topic) >= target
+            and topic["contradiction_rate"] <= QUALITY_MAX_CONTRADICTION)
+
+
+def quality_gate(run: dict) -> dict:
+    """Stage 5a per-topic pass/fail for the run.
+
+    worst_confidence (the lowest latest confidence, 0.0 if none) is the
+    OVERALL_CONFIDENCE surfaced in Stage 5c prompts and 5d's
+    final_confidence_score -- depths are per-topic, so there is no single
+    run target.
+    """
+    topics = [
+        {
+            "topic": t["topic"],
+            "depth": t["depth"],
+            "confidence": _latest_confidence(t),
+            "contradiction_rate": t["contradiction_rate"],
+            "replan_hint": t.get("replan_hint"),
+            "passes": topic_passes(t),
+        }
+        for t in run["topics"]
+    ]
+    return {
+        "passed": all(t["passes"] for t in topics),
+        "failing_topics": [t for t in topics if not t["passes"]],
+        "topics": topics,
+        "worst_confidence": min((t["confidence"] for t in topics), default=0.0),
+        "replan_count": run["replan_count"],
+    }
+
+
+_HOP_RE = re.compile(r"_hop(\d+)([a-z]?)(?:_(.*))?$")
+
+
+def _hop_files(state_dir: Path, prefix: str) -> list[Path]:
+    """<prefix>_hop*.json in numeric hop order (hop2 before hop10, hop1 before hop1b)."""
+    def key(p: Path):
+        m = _HOP_RE.search(p.stem)
+        return (int(m.group(1)), m.group(2), p.name) if m else (0, "", p.name)
+    return sorted(state_dir.glob(f"{prefix}_hop*.json"), key=key)
+
+
+def aggregate_hop_summaries(state_dir: Path, project: str) -> dict:
+    """Stage 6a: merge every summaries_hop*.json's items into summaries.json."""
+    seen: dict = {}  # insertion order = first-seen; later hops overwrite the value
+    for hop_file in _hop_files(state_dir, "summaries"):
+        m = _HOP_RE.search(hop_file.stem)
+        key = (m.group(3) or "") if m else ""
+        for item in json.loads(hop_file.read_text(encoding="utf-8")).get("items", []):
+            seen[(key, item.get("url"), item.get("title"))] = item
+    combined = {"topic": project, "items": list(seen.values())}
+    save_stage_output(state_dir, "summaries", combined)
+    return combined
+
+
+def aggregate_fetch_results(state_dir: Path) -> dict:
+    """Stage 7a: merge fetch_results_hop*.json into fetch_results_aggregated.json
+    as {fetched, by_url}. Later hops win on URL collisions. Written atomically
+    (temp + rename) so a crash never leaves a half-written file for resume."""
+    by_url: dict = {}
+    for hop_file in _hop_files(state_dir, "fetch_results"):
+        for entry in json.loads(hop_file.read_text(encoding="utf-8")).get("fetched", []):
+            by_url[entry["url"]] = entry
+    combined = {"fetched": list(by_url.values()), "by_url": by_url}
+    save_stage_output(state_dir, "fetch_results_aggregated", combined)
+    return combined
+
+
+def note_modified_since(path: Path, since_iso: str) -> dict:
+    """Stage 7c.i mtime guard: {'conflict': bool, 'mtime': str | None}.
+
+    conflict is True when the note exists and was modified after since_iso
+    (a naive timestamp is treated as UTC).
+    """
+    if not path.exists():
+        return {"conflict": False, "mtime": None}
+    since = datetime.fromisoformat(since_iso)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    file_time = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    return {"conflict": file_time > since, "mtime": str(file_time)}
+
+
 def init_topic(topic: str, mode: str, depth: str) -> dict:
     """Create a fresh topic state entry for the run.
 
@@ -625,3 +721,50 @@ def write_case_record(cases_dir: Path, case_data: dict) -> None:
     case_id = case_data["case_id"]
     case_file = cases_dir / f"{case_id}.json"
     case_file.write_text(json.dumps(case_data, indent=2), encoding="utf-8", newline="\n")
+
+
+_CASE_DEPTHS = ("quick", "standard", "deep", "exhaustive")
+
+
+def _pattern_dict(value) -> dict:
+    """pattern_detection calls .get() on patterns_that_* (keys source_tiers,
+    hop_chain, queries), so they must be dicts. A list or free text from the
+    orchestrator goes under a 'notes' key instead of crashing Stage 10d."""
+    if isinstance(value, dict):
+        return value
+    return {"notes": value} if value else {}
+
+
+def build_case_record(final: dict, inputs: dict) -> dict:
+    """Stage 10c: assemble the case record from complete_run()'s final dict plus
+    the orchestrator's end-of-run inputs (query, domain_tags,
+    patterns_that_worked / patterns_that_failed, sources_processed,
+    notes_created, notes_updated).
+
+    applied_patterns comes from the run itself: Stage 10d's W/L scoring reads
+    it, and dropping it silently turns the score/demotion loop into a no-op.
+    """
+    topics = final.get("topics", [])
+    return {
+        "case_id": final["run_id"],
+        "version": 1,
+        "query": inputs["query"],
+        "domain_tags": inputs.get("domain_tags", []),
+        "strategy_used": final.get("strategy", "unified"),
+        "depths_used": {d: sum(1 for t in topics if t.get("depth") == d) for d in _CASE_DEPTHS},
+        "hops_executed": sum(len(t.get("hop_genealogy", [])) for t in topics),
+        "confidence_per_topic": {
+            t["topic"]: (t["confidence_history"][-1] if t.get("confidence_history") else None)
+            for t in topics
+        },
+        "contradiction_rate": max((t.get("contradiction_rate", 0.0) for t in topics), default=0.0),
+        "patterns_that_worked": _pattern_dict(inputs.get("patterns_that_worked")),
+        "patterns_that_failed": _pattern_dict(inputs.get("patterns_that_failed")),
+        "applied_patterns": final.get("applied_patterns", []),
+        "outcomes": {
+            "sources_processed": inputs.get("sources_processed", 0),
+            "notes_created": inputs.get("notes_created", 0),
+            "notes_updated": inputs.get("notes_updated", 0),
+            "user_decisions": final.get("user_decisions", []),
+        },
+    }

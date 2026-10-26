@@ -101,7 +101,7 @@ Researcher runs on three tiers, and figures out which one you're on automaticall
 See [MANIFEST.md](MANIFEST.md) for the full file tree and how the pieces fit together.
 
 > [!NOTE]
-> **What you need:** Python 3.12, [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and an [Obsidian](https://obsidian.md/) vault. That's the whole base tier. Claude installs the optional Python pieces for you. The heavier extras (mise/Node, Docker for SearXNG) are only for the full tier and for contributors.
+> **What you need:** [uv](https://docs.astral.sh/uv/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and an [Obsidian](https://obsidian.md/) vault. That's the whole base tier. The first time Researcher runs, uv builds its Python 3.12 environment from the shipped lockfile (and downloads Python 3.12 if you don't have it). The heavier extras (mise/Node, Docker for SearXNG) are only for the full tier and for contributors.
 
 > [!IMPORTANT]
 > **Your data & privacy:** Your finished notes and your vault stay on your machine; there is no separate Researcher service. On the base tier, the web research runs through Claude Code's own search and page-fetching, so your queries and the source URLs go through Claude Code's web access, under the same terms as any other Claude Code session. Fetched pages are cached locally so the same URL is never pulled twice. On the mid and full tiers, more of the work moves on-device: summarizing runs locally through Ollama, and search can route through your own private SearXNG instance, so even the queries stay on your network. PII redaction and chain-of-custody for sensitive documents are out of scope here; that is [Magpie](https://github.com/TimSimpsonJr/magpie)'s job in the suite.
@@ -109,14 +109,15 @@ See [MANIFEST.md](MANIFEST.md) for the full file tree and how the pieces fit tog
 ## For developers
 
 ```bash
-pip install -r requirements.txt
-pip install pytest pytest-mock
-pytest tests/ -v
+uv sync --frozen
+uv run --frozen pytest
 ```
 
-The Python suite is 389 tests, all offline, no API key needed. The batch workflow's JavaScript helpers have their own `node --test` suite (run `node --test` from the repo root).
+Everything runs with `--frozen`, so uv never rewrites `uv.lock` on its own. Run `uv lock` when you deliberately want to update it.
 
-**Requirements:** Python 3.12, [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and an [Obsidian](https://obsidian.md/) vault.
+The Python suite runs offline, no API key needed. The batch workflow's JavaScript helpers have their own `node --test` suite (run `node --test` from the repo root).
+
+**Requirements:** [uv](https://docs.astral.sh/uv/) (it provides Python 3.12), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and an [Obsidian](https://obsidian.md/) vault.
 
 **Optional (full tier):** Docker (for SearXNG), Ollama, Playwright, `yt-dlp`, `openai-whisper`.
 

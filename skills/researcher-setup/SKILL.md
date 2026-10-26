@@ -7,30 +7,29 @@ description: 'Setup wizard for the research pipeline. Detects infrastructure, co
 
 You are an interactive setup wizard. Walk the user through configuring the research pipeline step by step. Use **AskUserQuestion** at every decision point. Never install or modify anything without explicit user confirmation.
 
-Scripts dir: `{{SCRIPTS_DIR}}`
-Python: `{{PYTHON_PATH}}`
+Plugin root: `REPO` = the directory two levels above this skill's base directory (Claude Code prints the base directory, ending in `skills/researcher-setup`, when the skill loads). Write that absolute path wherever `REPO` appears below, inside the quotes.
+
+All Python runs as one line through uv: `uv run --frozen --project "REPO" "REPO/scripts/rw.py" <subcommand> [flags]`. Never invoke the Python interpreter directly or write inline Python blocks. `rw.py` prints JSON; on failure it prints `ERROR: ...` on stderr and exits 1. During setup always pass `--vault "VAULT_ROOT"`: the vault has no config yet, so rw.py cannot find it on its own.
 
 ---
 
-## Step 0: Load Existing Config (if any)
+## Step 0: Check uv and Prepare the Environment
 
-Before starting the wizard, check if the user already has a config.
-
-Use Bash:
+Before starting the wizard, check that uv is installed. Use Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from pathlib import Path
-from config_manager import load_config
-import json
-
-# Try common locations — will be overridden once we know the vault path
-# For now just report that we'll ask for the vault path first
-print('READY')
-"
+uv --version
+```
+If it is not found, stop and tell the user to install uv, then re-run `/researcher-setup`:
+```
+  Windows (PowerShell):  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+  macOS / Linux:         curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-If this fails, report the error and attempt to continue — the Python environment may need troubleshooting.
+Then build the plugin's Python environment once:
+```bash
+uv sync --frozen --project "REPO"
+```
+This creates `REPO/.venv` from `REPO/uv.lock` (downloading Python 3.12 if needed). If it fails, report the error and attempt to continue — the Python environment may need troubleshooting.
 
 ---
 
@@ -92,19 +91,10 @@ Reference material and evergreen notes.
 
 Use Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from pathlib import Path
-from config_manager import load_config
-import json
-config = load_config(Path(r'VAULT_ROOT'))
-if config:
-    print('EXISTING_CONFIG')
-    print(json.dumps(config, indent=2))
-else:
-    print('NO_CONFIG')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" load-config --vault "VAULT_ROOT"
 ```
+
+It prints the config JSON, or `null` when the vault has none.
 
 If existing config is found, show the user its contents and ask:
 ```
@@ -122,70 +112,10 @@ If updating, skip steps where the user is happy with the current value. If start
 Run a vault scan to detect existing note patterns. Use Bash:
 
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from pathlib import Path
-import re, json, os
-
-vault = Path(r'VAULT_ROOT')
-
-# 1. Folder structure
-top_folders = sorted([
-    d.name for d in vault.iterdir()
-    if d.is_dir() and not d.name.startswith('.')
-])
-
-# 2. Sample notes for convention detection
-md_files = list(vault.rglob('*.md'))
-md_files = [f for f in md_files if not any(p.startswith('.') for p in f.relative_to(vault).parts)]
-
-tag_formats = {'list': 0, 'string': 0, 'inline': 0, 'none': 0}
-fm_fields = {}
-moc_files = []
-
-for f in md_files[:50]:
-    try:
-        text = f.read_text(encoding='utf-8')
-    except:
-        continue
-    # Check for MOC patterns
-    name = f.stem
-    if name.startswith('_') or any(k in name for k in ['MOC', 'Index', 'Hub', 'Overview', 'Dashboard']):
-        rel = str(f.relative_to(vault)).replace(os.sep, '/')
-        moc_files.append(rel)
-    # Frontmatter detection
-    fm_match = re.match(r'^---\n(.*?)\n---', text, re.DOTALL)
-    if fm_match:
-        fm = fm_match.group(1)
-        for line in fm.splitlines():
-            if ':' in line:
-                key = line.split(':')[0].strip()
-                fm_fields[key] = fm_fields.get(key, 0) + 1
-            if line.strip().startswith('tags:'):
-                rest = line.split(':', 1)[1].strip()
-                if rest.startswith('['):
-                    tag_formats['list'] += 1
-                elif rest.startswith('-') or rest == '':
-                    tag_formats['list'] += 1
-                else:
-                    tag_formats['string'] += 1
-    # Inline tag detection
-    inline_tags = re.findall(r'(?<!\w)#[a-zA-Z][a-zA-Z0-9_/-]+', text)
-    if inline_tags and not fm_match:
-        tag_formats['inline'] += 1
-
-result = {
-    'total_notes': len(md_files),
-    'top_folders': top_folders,
-    'tag_format_counts': tag_formats,
-    'dominant_tag_format': max(tag_formats, key=tag_formats.get) if any(tag_formats.values()) else 'list',
-    'frontmatter_fields': sorted(fm_fields.keys(), key=lambda k: -fm_fields[k])[:10],
-    'moc_files': moc_files[:10],
-    'moc_pattern': '^_|MOC|Index|Hub' if moc_files else '^_|MOC|Index'
-}
-print(json.dumps(result, indent=2))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" scan-vault --vault "VAULT_ROOT"
 ```
+
+It prints `total_notes`, `top_folders`, `tag_format_counts`, `dominant_tag_format`, `frontmatter_fields`, `moc_files` and `moc_pattern` (the first 50 non-hidden notes are sampled).
 
 Present the findings to the user:
 ```
@@ -207,12 +137,7 @@ Wait for acknowledgment via AskUserQuestion before proceeding.
 
 Use Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from detect_tier import get_platform_info
-import json
-print(json.dumps(get_platform_info(), indent=2))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" check platform
 ```
 
 Report to user:
@@ -231,12 +156,7 @@ Store `platform_info` for later steps.
 
 Check if Ollama is installed. Use Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from detect_tier import check_ollama
-import json
-print(json.dumps(check_ollama(), indent=2))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" check ollama
 ```
 
 **If installed and running:**
@@ -275,76 +195,12 @@ If the user declines, set `ollama_installed = False` and note that base tier wil
 
 Gather hardware info. Use Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import platform, subprocess, json, os
-
-info = {'total_ram_gb': 0, 'gpu_vram_gb': 0, 'gpu_name': 'unknown'}
-
-# RAM detection
-system = platform.system()
-if system == 'Windows':
-    try:
-        import ctypes
-        class MEMORYSTATUSEX(ctypes.Structure):
-            _fields_ = [('dwLength', ctypes.c_ulong),
-                        ('dwMemoryLoad', ctypes.c_ulong),
-                        ('ullTotalPhys', ctypes.c_ulonglong),
-                        ('ullAvailPhys', ctypes.c_ulonglong),
-                        ('ullTotalPageFile', ctypes.c_ulonglong),
-                        ('ullAvailPageFile', ctypes.c_ulonglong),
-                        ('ullTotalVirtual', ctypes.c_ulonglong),
-                        ('ullAvailVirtual', ctypes.c_ulonglong),
-                        ('ullAvailExtendedVirtual', ctypes.c_ulonglong)]
-        stat = MEMORYSTATUSEX()
-        stat.dwLength = ctypes.sizeof(stat)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-        info['total_ram_gb'] = round(stat.ullTotalPhys / (1024**3), 1)
-    except:
-        pass
-elif system == 'Darwin':
-    try:
-        out = subprocess.check_output(['sysctl', '-n', 'hw.memsize'], text=True)
-        info['total_ram_gb'] = round(int(out.strip()) / (1024**3), 1)
-    except:
-        pass
-else:
-    try:
-        with open('/proc/meminfo') as f:
-            for line in f:
-                if line.startswith('MemTotal:'):
-                    kb = int(line.split()[1])
-                    info['total_ram_gb'] = round(kb / (1024**2), 1)
-                    break
-    except:
-        pass
-
-# GPU VRAM detection via nvidia-smi
-try:
-    out = subprocess.check_output(
-        ['nvidia-smi', '--query-gpu=memory.total,name', '--format=csv,noheader,nounits'],
-        text=True, timeout=5
-    )
-    line = out.strip().splitlines()[0]
-    parts = line.split(',')
-    info['gpu_vram_gb'] = round(int(parts[0].strip()) / 1024, 1)
-    info['gpu_name'] = parts[1].strip()
-except:
-    # No NVIDIA GPU or nvidia-smi not available
-    pass
-
-print(json.dumps(info, indent=2))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" hardware-info
 ```
 
 Parse the hardware info and get a model recommendation. Use Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from detect_tier import recommend_model
-import json
-rec = recommend_model(RAM_GB, VRAM_GB)
-print(json.dumps(rec, indent=2))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" recommend-model --ram-gb RAM_GB --vram-gb VRAM_GB
 ```
 
 Replace `RAM_GB` and `VRAM_GB` with the values from the hardware check.
@@ -379,16 +235,7 @@ This sends a short prompt to the model to measure response time.
 
 If yes, run via Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import subprocess, time, json
-start = time.time()
-proc = subprocess.run(
-    ['ollama', 'run', 'MODEL_NAME', 'Summarize this in one sentence: The quick brown fox jumps over the lazy dog.'],
-    capture_output=True, text=True, timeout=120
-)
-elapsed_ms = round((time.time() - start) * 1000)
-print(json.dumps({'elapsed_ms': elapsed_ms, 'output': proc.stdout.strip()[:200], 'success': proc.returncode == 0}))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" benchmark-ollama --model MODEL_NAME
 ```
 
 Report the result and store `ollama_benchmark_ms`.
@@ -399,12 +246,7 @@ Report the result and store `ollama_benchmark_ms`.
 
 Check availability. Use Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from detect_tier import check_ytdlp
-import json
-print(json.dumps(check_ytdlp(), indent=2))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" check ytdlp
 ```
 
 **If installed:** Report `yt-dlp is available.` and set `ytdlp_available = True`.
@@ -415,13 +257,14 @@ Use AskUserQuestion:
 ```
 yt-dlp is not installed. It's used for downloading YouTube videos and extracting audio for transcription.
 
-Would you like to install it? (pip install yt-dlp)
+Would you like to install it? (uv tool install yt-dlp)
 ```
 
 If yes, run via Bash:
 ```bash
-"{{PYTHON_PATH}}" -m pip install yt-dlp
+uv tool install yt-dlp
 ```
+If `check ytdlp` still reports it missing afterwards, uv's tool directory is not on PATH: run `uv tool update-shell` and restart the terminal.
 
 Re-check after install. If the user declines, set `ytdlp_available = False`.
 
@@ -431,12 +274,7 @@ Re-check after install. If the user declines, set `ytdlp_available = False`.
 
 Check availability. Use Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from detect_tier import check_whisper
-import json
-print(json.dumps(check_whisper(), indent=2))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" check whisper
 ```
 
 **If installed:** Report `Whisper is available (backend: {backend}).` and set `whisper_available = True`.
@@ -446,7 +284,7 @@ print(json.dumps(check_whisper(), indent=2))
 Whisper is not installed. It's used for audio transcription (YouTube videos, podcasts, interviews).
 
 Installation is optional and requires significant disk space and compute resources.
-To install later: pip install openai-whisper
+To install later: uv tool install openai-whisper
 
 Skipping for now.
 ```
@@ -472,12 +310,7 @@ Enter the URL, or type "skip" to skip.
 
 Test connectivity via Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from detect_tier import check_searxng
-import json
-print(json.dumps(check_searxng('USER_URL'), indent=2))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" check searxng --url "USER_URL"
 ```
 
 If reachable: `SearXNG is reachable at {url}.` Set `searxng_url`.
@@ -493,54 +326,47 @@ If not reachable: `Could not connect to SearXNG at {url}. Check that the server 
 
 Use Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from detect_tier import detect_tier
-print(detect_tier(SEARXNG_URL_OR_NONE))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" detect-tier --searxng-url "SEARXNG_URL"
 ```
 
-Replace `SEARXNG_URL_OR_NONE` with the SearXNG URL string (quoted) or `None`.
+Drop `--searxng-url "SEARXNG_URL"` when SearXNG was skipped. It prints the tier as a JSON string (`"base"`, `"mid"` or `"full"`).
 
 ### 9b. Save config
 
-Build the config dict from all collected values and save it. Use Bash:
+Write the config to `VAULT_ROOT/.researcher/setup_config.json` with the Write tool:
 
-```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from pathlib import Path
-from config_manager import save_config
-import json
-
-config = {
-    'vault_root': r'VAULT_ROOT',
-    'inbox': 'INBOX_FOLDER',
-    'assets': 'ASSETS_FOLDER',
-    'moc_pattern': 'MOC_PATTERN',
-    'tag_format': 'TAG_FORMAT',
-    'date_format': '%Y-%m-%d',
-    'frontmatter_fields': FRONTMATTER_FIELDS_LIST,
-    'ollama_enabled': OLLAMA_BOOL,
-    'ollama_model': OLLAMA_MODEL_OR_NONE,
-    'ollama_benchmark_ms': BENCHMARK_OR_NONE,
-    'searxng_url': SEARXNG_URL_OR_NONE,
-    'whisper_available': WHISPER_BOOL,
-    'ytdlp_available': YTDLP_BOOL,
-    'tier': 'TIER',
+```json
+{
+  "vault_root": "VAULT_ROOT",
+  "inbox": "INBOX_FOLDER",
+  "assets": "ASSETS_FOLDER",
+  "moc_pattern": "MOC_PATTERN",
+  "tag_format": "TAG_FORMAT",
+  "date_format": "%Y-%m-%d",
+  "frontmatter_fields": FRONTMATTER_FIELDS_LIST,
+  "ollama_enabled": OLLAMA_BOOL,
+  "ollama_model": OLLAMA_MODEL_OR_NULL,
+  "ollama_benchmark_ms": BENCHMARK_OR_NULL,
+  "searxng_url": SEARXNG_URL_OR_NULL,
+  "whisper_available": WHISPER_BOOL,
+  "ytdlp_available": YTDLP_BOOL,
+  "tier": "TIER"
 }
-
-save_config(Path(r'VAULT_ROOT'), config)
-print('Config saved to VAULT_ROOT/.researcher/config.json')
-print(json.dumps(config, indent=2))
-"
 ```
 
 Replace all placeholders with the actual values collected during the wizard. Use the detected values from Step 2 for `inbox` (default "Inbox" if an "Inbox" folder exists, otherwise the first folder that looks like an inbox), `assets`, `moc_pattern`, `tag_format`, and `frontmatter_fields`.
 
+Use JSON values: `true` / `false`, `null` for none, a JSON list for `frontmatter_fields`. Write `vault_root` with forward slashes (or doubled backslashes) so the JSON stays valid. Then save it:
+
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" save-config --vault "VAULT_ROOT" --config-file "VAULT_ROOT/.researcher/setup_config.json"
+```
+
+It writes `VAULT_ROOT/.researcher/config.json` and prints the saved config. Once saved, `.researcher/setup_config.json` can be deleted.
+
 ### 9c. Generate vault_rules.txt
 
-Create `{{SCRIPTS_DIR}}/scripts/prompts/vault_rules.txt` using the Write tool. Base the content on the detected conventions:
+Create `REPO/scripts/prompts/vault_rules.txt` using the Write tool. Base the content on the detected conventions:
 
 ```markdown
 ## Vault Rules
@@ -595,18 +421,10 @@ Adjust the rules to match what was detected in Step 2. If no vault_rules.txt exi
 
 Use Bash:
 ```bash
-"{{PYTHON_PATH}}" -c "
-import sys; sys.path.insert(0, '{{SCRIPTS_DIR}}/scripts')
-from pathlib import Path
-from vault_index import build_index, list_notes
-
-vault = Path(r'VAULT_ROOT')
-db_path = build_index(vault)
-notes = list_notes(vault)
-print(f'Index built at: {db_path}')
-print(f'Notes indexed: {len(notes)}')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" build-index --vault "VAULT_ROOT"
 ```
+
+It prints `{"db_path": ..., "notes_indexed": N}`.
 
 Report:
 ```
@@ -634,7 +452,7 @@ Install CSS snippet? [yes / no]
 Copy the snippet into the vault's snippets directory. Use Bash:
 ```bash
 mkdir -p "VAULT_ROOT/.obsidian/snippets"
-cp "{{SCRIPTS_DIR}}/assets/research-metadata-hide.css" "VAULT_ROOT/.obsidian/snippets/research-metadata-hide.css"
+cp "REPO/assets/research-metadata-hide.css" "VAULT_ROOT/.obsidian/snippets/research-metadata-hide.css"
 ```
 
 Replace `VAULT_ROOT` with the actual vault path. Then tell the user:
@@ -674,7 +492,7 @@ Vault conventions:
   - Notes indexed: {count}
 
 Config saved to: {vault_root}/.researcher/config.json
-Vault rules saved to: {scripts_dir}/scripts/prompts/vault_rules.txt
+Vault rules saved to: {REPO}/scripts/prompts/vault_rules.txt
 
 Next steps:
   - Run /researcher "your topic" to start researching

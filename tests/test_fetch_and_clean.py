@@ -273,6 +273,43 @@ def test_process_urls_content_truncated_at_50k(tmp_path):
     assert len(fetched[0]["content"]) == MAX_CONTENT_CHARS
 
 
+def test_process_urls_caches_full_content_not_truncated(tmp_path):
+    # The output cap must not reach the cache: a later run with a higher cap
+    # (or a reader of the cache) needs the whole document.
+    from fetch_and_clean import process_urls, load_cache, url_cache_key, MAX_CONTENT_CHARS
+    url = "https://example.com/long-packet"
+    long_content = "x" * (MAX_CONTENT_CHARS + 1000)
+    with patch("fetch_and_clean.fetch_url", return_value=(long_content, "title", "jina")):
+        fetched, _ = process_urls(urls=[{"url": url}], cache_dir=tmp_path, ttl_days=7, jina_api_key=None)
+    assert len(fetched[0]["content"]) == MAX_CONTENT_CHARS
+    assert len(load_cache(tmp_path, url_cache_key(url))["content"]) == MAX_CONTENT_CHARS + 1000
+
+
+def test_fetch_single_caches_full_content_not_truncated(tmp_path):
+    from fetch_and_clean import _fetch_single, load_cache, url_cache_key, MAX_CONTENT_CHARS
+    url = "https://example.com/long-packet-parallel"
+    long_content = "y" * (MAX_CONTENT_CHARS + 1000)
+    with patch("fetch_and_clean.fetch_url", return_value=(long_content, "title", "jina")):
+        result, failed = _fetch_single({"url": url}, tmp_path, 7, None)
+    assert failed is None
+    assert len(result["content"]) == MAX_CONTENT_CHARS
+    assert len(load_cache(tmp_path, url_cache_key(url))["content"]) == MAX_CONTENT_CHARS + 1000
+
+
+def test_cache_hit_serves_full_content_under_raised_cap(tmp_path, monkeypatch):
+    import fetch_and_clean
+    from fetch_and_clean import process_urls, url_cache_key, MAX_CONTENT_CHARS
+    url = "https://example.com/long-packet-rerun"
+    long_content = "z" * (MAX_CONTENT_CHARS + 1000)
+    with patch("fetch_and_clean.fetch_url", return_value=(long_content, "title", "jina")):
+        process_urls(urls=[{"url": url}], cache_dir=tmp_path, ttl_days=7, jina_api_key=None)
+    monkeypatch.setattr(fetch_and_clean, "MAX_CONTENT_CHARS", MAX_CONTENT_CHARS * 2)
+    with patch("fetch_and_clean.fetch_url") as mock_fetch:
+        fetched, _ = process_urls(urls=[{"url": url}], cache_dir=tmp_path, ttl_days=7, jina_api_key=None)
+    mock_fetch.assert_not_called()
+    assert len(fetched[0]["content"]) == MAX_CONTENT_CHARS + 1000
+
+
 def test_process_urls_expired_cache_refetches(tmp_path):
     from fetch_and_clean import process_urls, save_cache, url_cache_key
     url = "https://example.com/old"

@@ -110,6 +110,79 @@ def get_platform_info() -> dict:
     }
 
 
+def get_hardware_info() -> dict:
+    """Total RAM and NVIDIA VRAM in GB, for the setup wizard's model pick.
+
+    Pieces that can't be detected stay 0 / "unknown"; never raises.
+    """
+    info = {"total_ram_gb": 0, "gpu_vram_gb": 0, "gpu_name": "unknown"}
+    system = platform.system()
+    try:
+        if system == "Windows":
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(stat)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            info["total_ram_gb"] = round(stat.ullTotalPhys / (1024 ** 3), 1)
+        elif system == "Darwin":
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
+            info["total_ram_gb"] = round(int(out.strip()) / (1024 ** 3), 1)
+        else:
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        info["total_ram_gb"] = round(int(line.split()[1]) / (1024 ** 2), 1)
+                        break
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"],
+            text=True, timeout=5,
+        )
+        parts = out.strip().splitlines()[0].split(",")
+        info["gpu_vram_gb"] = round(int(parts[0].strip()) / 1024, 1)
+        info["gpu_name"] = parts[1].strip()
+    except Exception:
+        pass  # no NVIDIA GPU or nvidia-smi not installed
+    return info
+
+
+BENCHMARK_PROMPT = "Summarize this in one sentence: The quick brown fox jumps over the lazy dog."
+
+
+def benchmark_ollama(model: str, prompt: str = BENCHMARK_PROMPT) -> dict:
+    """Time one short `ollama run` prompt: {elapsed_ms, output, success}."""
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            ["ollama", "run", model, prompt],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"elapsed_ms": round((time.time() - start) * 1000),
+                "output": str(e)[:200], "success": False}
+    return {
+        "elapsed_ms": round((time.time() - start) * 1000),
+        "output": proc.stdout.strip()[:200],
+        "success": proc.returncode == 0,
+    }
+
+
 def ensure_searxng(url: str | None, repo_root: Path | None = None) -> dict:
     """Try to start SearXNG if configured but not running.
 

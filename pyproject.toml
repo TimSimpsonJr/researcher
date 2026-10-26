@@ -1,0 +1,26 @@
+[project]
+name = "researcher"
+version = "3.2.1"
+description = "Claude Code plugin: multi-hop web research written into Obsidian vault notes"
+requires-python = ">=3.12"
+dependencies = [
+    "requests",
+    "pymupdf",
+    "python-docx",
+    "rich",
+    "PyYAML",
+]
+# Optional full-tier tools (yt-dlp, openai-whisper) stay outside this lock;
+# /researcher-setup installs them with `uv tool install`.
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-mock",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

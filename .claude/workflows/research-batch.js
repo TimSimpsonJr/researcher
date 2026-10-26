@@ -346,7 +346,7 @@ function searchAgent(topic, config, hop) {
         next_hop: topic.replan_hint ? null : topic.next_hop ?? null,
         replan_hint: topic.replan_hint ?? null,
         vault_root: config.vault_root ?? null,
-        scripts_dir: config.scripts_dir ?? null,
+        repo: config.repo ?? null,
       },
     },
   );
@@ -367,8 +367,7 @@ function fetchSummarizeAgent(topic, hits, config, hop) {
         hop,
         selected_urls: hits?.selected_urls ?? [],
         config: {
-          scripts_dir: config.scripts_dir ?? null,
-          python_path: config.python_path ?? null,
+          repo: config.repo ?? null,
           ollama_model: config.ollama_model ?? null,
           tier: config.tier ?? 'base',
           work_dir: config.work_dir ?? null,
@@ -380,7 +379,7 @@ function fetchSummarizeAgent(topic, hits, config, hop) {
 
 // researcher:hop-planner — judgment-only next-hop pick (the JS loop owns the
 // continue/stop/replan decision; we read only next_hop from its return).
-function hopPlannerAgent(topic, vaultDigest, hop) {
+function hopPlannerAgent(topic, vaultDigest, hop, config) {
   return callAgent(
     'Judge the best next hop for the topic in the Input, following your agent instructions.',
     {
@@ -397,6 +396,8 @@ function hopPlannerAgent(topic, vaultDigest, hop) {
         hop_genealogy: topic.hop_genealogy ?? [],
         seen_urls: topic.seen_urls ?? [],
         vaultDigest: vaultDigest ?? [],
+        vault_root: config?.vault_root ?? null,
+        repo: config?.repo ?? null,
       },
     },
   );
@@ -458,7 +459,7 @@ function threadAgent(ctx) {
         written_notes: ctx.written_notes ?? [],
         vaultDigest: ctx.config?.vaultDigest ?? [],
         vault_root: ctx.config?.vault_root ?? null,
-        scripts_dir: ctx.config?.scripts_dir ?? null,
+        repo: ctx.config?.repo ?? null,
       },
     },
   );
@@ -640,7 +641,7 @@ async function runResearch(topics, config) {
             maxHops: t.max_hops ?? profile.max_hops,
             target: profile.confidence_target,
           });
-          const planned = decision === 'continue' ? await hopPlannerAgent(t, vaultDigest, hop) : null;
+          const planned = decision === 'continue' ? await hopPlannerAgent(t, vaultDigest, hop, config) : null;
           applyDecision(t, decision, { confidence, contradictionRate: cr }, planned?.next_hop ?? null);
         }
       }
