@@ -35,21 +35,17 @@ You will receive:
 - `hop_genealogy` -- array of prior hop records (pattern, from, sources_kept)
 - `seen_urls` -- URLs already fetched (for novelty checks on candidates)
 - `vault_index_path` -- path to vault FTS5 index (for novelty checks)
+- `vault_root` -- absolute path to the Obsidian vault
+- `repo` -- absolute path to the researcher plugin root
 
 ---
 
 ## Step 1: Compute Confidence
 
-Call the confidence formula on `sources_so_far`. The orchestrator substitutes the `{scripts_dir}`, `{sources_file}`, and `{depth}` placeholders before dispatching the prompt — treat them as filled in by the time you run this:
+Call the confidence formula on `sources_so_far`. The orchestrator substitutes the `{repo}`, `{sources_file}`, and `{depth}` placeholders before dispatching the prompt — treat them as filled in by the time you run this:
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, '{scripts_dir}')
-from confidence import compute_confidence
-sources = json.loads(open('{sources_file}').read())
-print(compute_confidence(sources, depth='{depth}'))
-"
+uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" compute-confidence --sources-file "{sources_file}" --depth {depth}
 ```
 
 Record the resulting score.
@@ -91,18 +87,13 @@ Avoid repeating a pattern from `hop_genealogy` unless the prior attempt failed (
 For each candidate target (entity, time period, concept, cause), score 0-10 using:
 
 - **Frequency (0-3):** how many summaries mention this candidate
-- **Novelty (0-3):** is this new to the vault? Query the vault index via Bash to check. Example query (orchestrator substitutes `{vault_index_path}`):
+- **Novelty (0-3):** is this new to the vault? Query the vault index via Bash to check. Example query (orchestrator substitutes `{repo}` and `{vault_root}`):
 
   ```bash
-  python -c "
-  import sys, json
-  sys.path.insert(0, '{scripts_dir}')
-  from vault_index import search
-  from pathlib import Path
-  hits = search(Path('{vault_index_path}').parent, 'CANDIDATE_NAME', limit=5)
-  print(len(hits))   # 0 = fully novel; 1-2 = some coverage; 3+ = well-covered
-  "
+  uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" vault-search --vault "{vault_root}" --query "CANDIDATE_NAME" --limit 5
   ```
+
+  Count the returned results: 0 = fully novel; 1-2 = some coverage; 3+ = well-covered.
 
   Score 3 if no hits (fully novel), 2 if 1-2 hits (extends a thin existing note), 1 if 3-4 hits (extends a well-covered note), 0 if 5+ hits (well-covered, low novelty).
 - **Connectedness (0-2):** does it relate to multiple existing vault notes?

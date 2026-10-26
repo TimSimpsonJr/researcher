@@ -26,7 +26,7 @@ You parse natural language research prompts into a structured execution plan. Yo
 You will receive:
 - `prompt` -- the user's natural language research request
 - `vault_root` -- absolute path to the Obsidian vault
-- `scripts_dir` -- absolute path to the researcher scripts directory
+- `repo` -- absolute path to the researcher plugin root
 
 ---
 
@@ -118,7 +118,7 @@ If vault note references were detected:
 
 If no vault references but the prompt mentions a specific domain, use Bash to query the vault index:
 ```bash
-python -c "import sys; sys.path.insert(0, '{scripts_dir}'); from vault_index import search; from pathlib import Path; import json; print(json.dumps(search(Path('{vault_root}'), 'relevant query terms'), indent=2))"
+uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" vault-search --vault "{vault_root}" --query "relevant query terms"
 ```
 
 Include any matching vault note paths in `shared_context_files` so downstream agents can reference them.

@@ -28,7 +28,7 @@ You will receive:
   - `key_claims` -- notable factual assertions
 - `written_notes` -- list of notes that were written in this batch (paths and titles)
 - `vault_root` -- absolute path to the Obsidian vault
-- `scripts_dir` -- absolute path to the researcher scripts directory
+- `repo` -- absolute path to the researcher plugin root
 
 ---
 
@@ -56,7 +56,7 @@ Scan all summaries and collect:
 For each candidate lead, query the vault index to check if it already has a note:
 
 ```bash
-python -c "import sys; sys.path.insert(0, '{scripts_dir}'); from vault_index import search; from pathlib import Path; import json; print(json.dumps(search(Path('{vault_root}'), 'entity or claim keywords'), indent=2))"
+uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" vault-search --vault "{vault_root}" --query "entity or claim keywords"
 ```
 
 Mark each lead as:

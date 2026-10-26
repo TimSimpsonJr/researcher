@@ -17,8 +17,8 @@ batch workflow cannot run Bash or Python itself, so it dispatches you to do the
 fetch + summarize for **one topic at one hop** and return structured summaries.
 
 You drive the *exact same* scripts the inline pipeline uses (SKILL.md Stages
-4b/4d), via the **full Python path** from the config (neither `python` nor the
-scripts dir is on PATH). You do not search, classify, or write notes.
+4b/4d), through uv against the plugin's locked environment (`config.repo` is
+the plugin root). You do not search, classify, or write notes.
 
 **Output only the single JSON object described in the Output section. No
 narration, no backticks, no prose.**
@@ -37,8 +37,7 @@ You receive a `## Input` JSON block at the end of this prompt:
       "primary_type": "agency_data", "credibility_score": 0.95 }
   ],
   "config": {
-    "scripts_dir": "/abs/path/to/researcher/scripts",
-    "python_path": "/abs/path/to/python.exe",
+    "repo": "/abs/path/to/researcher",
     "ollama_model": "qwen2.5:14b",
     "tier": "mid",
     "work_dir": "/abs/path/to/a/writable/scratch/dir"
@@ -53,7 +52,7 @@ You receive a `## Input` JSON block at the end of this prompt:
 
 ## What to do
 
-Use `PY` = `config.python_path`, `S` = `config.scripts_dir`, and a **unique**
+Use `R` = `config.repo` and a **unique**
 work directory `W` = `{config.work_dir}/fsr_{slug(topic)}_h{hop}` (create it; the
 slug keeps parallel runners from colliding). Always quote paths.
 
@@ -64,7 +63,7 @@ slug keeps parallel runners from colliding). Always quote paths.
 
 **2. Fetch.** Run via Bash (the same invocation as SKILL Stage 4b):
 ```bash
-"PY" "S/fetch_and_clean.py" --input "W/search_context.json" --output "W/fetch_results.json"
+uv run --frozen --project "R" "R/scripts/fetch_and_clean.py" --input "W/search_context.json" --output "W/fetch_results.json"
 ```
 Read `W/fetch_results.json`. It has `{ "fetched": [{url, title, content, ...}], "failed": [...] }`.
 If `fetched` is empty, return `{ "items": [] }` and stop.
@@ -73,14 +72,14 @@ If `fetched` is empty, return `{ "items": [] }` and stop.
 
 - **Ollama available** (`config.tier != "base"` AND `config.ollama_model` is set):
   ```bash
-  "PY" "S/summarize.py" --input "W/fetch_results.json" --model "<config.ollama_model>" --output "W/summaries.json"
+  uv run --frozen --project "R" "R/scripts/summarize.py" --input "W/fetch_results.json" --model "<config.ollama_model>" --output "W/summaries.json"
   ```
   Read `W/summaries.json`; its `items` already carry `summary`, `source_type`,
   `key_entities`, `key_claims`.
 
 - **Base tier** (no Ollama):
   ```bash
-  "PY" "S/summarize.py" --input "W/fetch_results.json" --prepare-for-claude --output-dir "W/summaries/"
+  uv run --frozen --project "R" "R/scripts/summarize.py" --input "W/fetch_results.json" --prepare-for-claude --output-dir "W/summaries/"
   ```
   Read each prepared article file in `W/summaries/` and summarize it **yourself**
   into `{ summary, source_type, key_entities, key_claims }`: a 3–6 sentence

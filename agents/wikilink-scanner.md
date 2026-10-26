@@ -23,7 +23,7 @@ You will receive:
 - `new_notes` -- list of `{path, title}` for notes created in this batch
 - `project_folder` -- vault-relative folder path containing the project
 - `vault_root` -- absolute path to the Obsidian vault
-- `scripts_dir` -- absolute path to the researcher scripts directory
+- `repo` -- absolute path to the researcher plugin root
 
 ---
 
@@ -41,7 +41,7 @@ Use the Read tool to read each note in `new_notes`. For each note, extract:
 For each key entity found in the new notes that is NOT already wikilinked, query the vault index to check if a matching note exists:
 
 ```bash
-python -c "import sys; sys.path.insert(0, '{scripts_dir}'); from vault_index import search; from pathlib import Path; import json; print(json.dumps(search(Path('{vault_root}'), '{entity_keywords}'), indent=2))"
+uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" vault-search --vault "{vault_root}" --query "{entity_keywords}"
 ```
 
 If a matching vault note exists and is NOT the same note being scanned, record it as a wikilink opportunity for the new note.
@@ -53,14 +53,10 @@ If a matching vault note exists and is NOT the same note being scanned, record i
 List all markdown files in the project folder:
 
 ```bash
-python -c "
-import json
-from pathlib import Path
-folder = Path('{vault_root}') / '{project_folder}'
-files = [str(f.relative_to(Path('{vault_root}'))) for f in folder.rglob('*.md') if f.is_file()]
-print(json.dumps(files))
-"
+uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" list-notes --vault "{vault_root}" --folder "{project_folder}"
 ```
+
+It prints the vault-relative paths of all indexed notes under that folder.
 
 For each existing note that is NOT one of the `new_notes`:
 1. Read the note content using the Read tool

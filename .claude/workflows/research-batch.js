@@ -346,7 +346,7 @@ function searchAgent(topic, config, hop) {
         next_hop: topic.replan_hint ? null : topic.next_hop ?? null,
         replan_hint: topic.replan_hint ?? null,
         vault_root: config.vault_root ?? null,
-        scripts_dir: config.scripts_dir ?? null,
+        repo: config.repo ?? null,
       },
     },
   );
@@ -367,8 +367,7 @@ function fetchSummarizeAgent(topic, hits, config, hop) {
         hop,
         selected_urls: hits?.selected_urls ?? [],
         config: {
-          scripts_dir: config.scripts_dir ?? null,
-          python_path: config.python_path ?? null,
+          repo: config.repo ?? null,
           ollama_model: config.ollama_model ?? null,
           tier: config.tier ?? 'base',
           work_dir: config.work_dir ?? null,
@@ -458,7 +457,7 @@ function threadAgent(ctx) {
         written_notes: ctx.written_notes ?? [],
         vaultDigest: ctx.config?.vaultDigest ?? [],
         vault_root: ctx.config?.vault_root ?? null,
-        scripts_dir: ctx.config?.scripts_dir ?? null,
+        repo: ctx.config?.repo ?? null,
       },
     },
   );

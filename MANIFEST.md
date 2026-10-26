@@ -61,6 +61,6 @@ docs/plans/, docs/handoffs/            # Design docs (gitignored except force-ad
 - **Batch path (new):** Stage 3.5 routes `N > batch_threshold` all-`web_research` batches (when `librarian` is available) to Stage 4B, which dispatches `.claude/workflows/research-batch.js`; everything else stays on the inline path.
 - **The workflow** fans the per-topic hop loop out via `agentType` (researcher's search / fetch-summarize-runner / hop-planner; JS `confidence.js`/decide/replan) and delegates the write span to Librarian (classify-agent + the `librarian` skill writer + wikilink-scanner), then thread-discoverer.
 - `research-batch.js` inlines `lib/confidence.js` + `lib/schemas.js` (exports stripped); `test/contract.test.js` guards the inline-sync + the Workflow launch contract; `tools/reinline-workflow.mjs` refreshes the blocks.
-- `fetch-summarize-runner` wraps `fetch_and_clean.py` + `summarize.py` (the workflow has no Bash/Python), using the full `python_path` from config.
+- `fetch-summarize-runner` wraps `fetch_and_clean.py` + `summarize.py` (the workflow has no Bash/Python) via `uv run --frozen --project <repo>`; the workflow passes `repo` in its config.
 - **v3.1 case learning:** `case_analyzer.analyze()` (Stage 10d) wires `pattern_detection.py` + `accumulator.py` + `learned_patterns.py` + `score_updates.py`; state at `{vault}/.researcher/`, serialized by `state.acquire_state_lock`.
 - `migrate.migrate_vault_dir` runs at Stage 0a — one-time `.research-workflow/`->`.researcher/` rename for existing vaults.
