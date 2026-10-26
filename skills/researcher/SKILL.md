@@ -9,15 +9,44 @@ You are the orchestrator. You run a stateful multi-stage research pipeline that 
 
 ## Bootstrap Constants
 
-- `VAULT` = `{{VAULT_ROOT}}`
-- `REPO` = `{{REPO_ROOT}}`
-- `SCRIPTS` = `REPO/scripts`
-- `STATE_DIR` = `VAULT/.researcher/state`
-- `CASES_DIR` = `VAULT/.researcher/cases`
+- `REPO` = the plugin root. When this skill loads, Claude Code prints its base directory (ending in `skills/researcher`); `REPO` is the directory two levels above it. Write that absolute path wherever `REPO` appears below, inside the quotes.
+- `VAULT`, `SCRIPTS`, `STATE_DIR`, `CASES_DIR` = the `vault`, `scripts`, `state_dir` and `cases_dir` values printed by `rw.py locate` (Stage 0, Pre-flight).
+
+## Running Python
+
+All Python runs through uv against the plugin's locked environment (`REPO/pyproject.toml` + `REPO/uv.lock`). Every call is a single line:
+
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" <subcommand> [flags]
+```
+
+The pipeline scripts run the same way, e.g. `uv run --frozen --project "REPO" "REPO/scripts/fetch_and_clean.py" --input ...`. Never invoke the Python interpreter directly and never write inline Python one-liners or multi-line Python blocks. Shell variables do not persist between Bash calls, so write each command out in full.
+
+`rw.py` prints JSON on stdout. On failure it prints `ERROR: ...` on stderr and exits 1. JSON payloads (plans, hop records, replan specs, classification) are passed as files: write the JSON with the Write tool under `STATE_DIR/` and pass the path. `rw.py` finds the vault by walking up from the current directory to the first folder containing `.researcher/config.json`.
 
 ---
 
 ## Stage 0: Load Config and Detect Tier
+
+### Pre-flight: uv and the vault
+
+Check that uv is installed. Run via Bash:
+```bash
+uv --version
+```
+If the command is not found, stop and tell the user:
+```
+Researcher needs uv to run its Python scripts. Install it, then re-run /researcher:
+  Windows (PowerShell):  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+  macOS / Linux:         curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+The first uv call after a plugin install or update builds the plugin's `.venv` from the lockfile (downloading Python 3.12 if needed). That takes up to a minute once; later calls start immediately.
+
+Then locate the vault. Run via Bash:
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" locate
+```
+Store `VAULT`, `SCRIPTS`, `STATE_DIR` and `CASES_DIR` from the printed JSON. If it exits non-zero, show its message and stop: the user needs to run `/researcher-setup` or start Claude Code inside the vault.
 
 ### 0a. Load config
 
@@ -25,31 +54,15 @@ First, migrate any existing vault state from the pre-rename directory name
 (`.research-workflow/` -> `.researcher/`). This is one-time and idempotent -- a
 no-op for new vaults or vaults already migrated. Run via Bash:
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from migrate import migrate_vault_dir
-from pathlib import Path
-print(migrate_vault_dir(Path('VAULT')))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" migrate
 ```
-This prints `migrated`, `noop`, or `conflict`. If it prints `conflict`, warn the
+This prints `"migrated"`, `"noop"`, or `"conflict"`. If it prints `"conflict"`, warn the
 user that both `.research-workflow/` and `.researcher/` exist under the vault and
 a manual merge is needed, then continue (config loads from `.researcher/`).
 
 Then load config. Run via Bash:
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from config_manager import load_config
-from pathlib import Path
-cfg = load_config(Path('VAULT'))
-if cfg is None:
-    print('ERROR: No config found. Run /researcher-setup first.')
-    sys.exit(1)
-print(json.dumps(cfg))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" load-config
 ```
 
 Parse the JSON output. Extract and store:
@@ -57,23 +70,16 @@ Parse the JSON output. Extract and store:
 - `OLLAMA_MODEL` = `cfg.ollama_model` (may be null)
 - `SEARXNG_URL` = `cfg.searxng_url` (may be null)
 
-If the command prints `ERROR:`, output the error and stop.
+If it prints `null`, output `ERROR: No config found. Run /researcher-setup first.` and stop.
 
 ### 0b. Detect tier (with auto-start and degradation alert)
 
 Run via Bash:
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from detect_tier import build_tier_report
-from pathlib import Path
-report = build_tier_report(SEARXNG_URL, Path('REPO'))
-print(json.dumps(report))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" tier-report
 ```
 
-Substitute `SEARXNG_URL` with the value from config (Python `None` if null, or the quoted string URL). Substitute `REPO` with the repo root path.
+It reads `searxng_url` from the vault config and passes the plugin root for the SearXNG auto-start.
 
 Parse the JSON. Extract and store:
 - `TIER` = `report.tier`
@@ -114,14 +120,7 @@ If SearXNG was auto-started (check `report.components.searxng.auto_started`), lo
 
 Run via Bash:
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from vault_index import update_index
-from pathlib import Path
-stats = update_index(Path('VAULT'))
-print(json.dumps(stats))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" update-index
 ```
 
 This ensures the FTS5 index is current before any agent queries it. Log the stats but do not block on them.
@@ -132,19 +131,7 @@ This ensures the FTS5 index is current before any agent queries it. Log the stat
 
 Run via Bash:
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import load_run, is_stale_run
-from pathlib import Path
-state_dir = Path('STATE_DIR')
-r = load_run(state_dir)
-if r is None:
-    print('null')
-else:
-    r['is_stale'] = is_stale_run(state_dir)
-    print(json.dumps(r))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" check-run
 ```
 
 **If `null`:** No active run. Proceed to Stage 2.
@@ -163,7 +150,7 @@ Resume / Restart / Abandon?
 
 Use the user's response:
 - **Resume:** Skip to the stage recorded in `stage`. Load any saved stage outputs from `STATE_DIR` and continue from there.
-- **Restart:** Run `python -c "from state import abandon_run; abandon_run(Path('STATE_DIR'))"` via Bash, then proceed to Stage 2.
+- **Restart:** Run `uv run --frozen --project "REPO" "REPO/scripts/rw.py" abandon-run` via Bash, then proceed to Stage 2.
 - **Abandon:** Run the same abandon command and stop.
 
 If `state.load_run()` returned None and the user just ran /researcher (no other reason for that), it may be that an old-schema (v2) run was abandoned silently. Stage 0's config load already printed the migration message -- no further action needed.
@@ -179,16 +166,7 @@ The resolver classifies the prompt's strategy before resolving topics. The run i
 Generate a run ID from the current date and a slugified version of the user's input (e.g., `2026-03-05-sc-alpr-research`). Then:
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import create_run, update_stage
-from pathlib import Path
-state_dir = Path('STATE_DIR')
-r = create_run(state_dir, 'RUN_ID', 'TIER')
-update_stage(state_dir, 'triage')
-print(json.dumps(r))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" create-run --run-id "RUN_ID" --tier "TIER"
 ```
 
 The run begins with no topics; topics are populated after the resolver returns (in 2c.iv or Stage 3).
@@ -205,7 +183,7 @@ Dispatch via the Task tool:
 ```
 prompt: {the user's original input}
 vault_root: {VAULT}
-scripts_dir: {SCRIPTS}
+repo: {REPO}
 ```
 
 ### 2c. Parse strategy and persist it
@@ -215,15 +193,7 @@ The agent returns a JSON object. Read the top-level `strategy` field.
 **Persist the strategy immediately** -- every path through Stage 2 ends up needing `run["strategy"]` set, so save it before branching. (`intent_planning` runs may re-dispatch in 2d and produce a different strategy; that re-dispatch overwrites this value.)
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import load_run, save_state
-from pathlib import Path
-run = load_run(Path('STATE_DIR'))
-run['strategy'] = 'STRATEGY_VALUE_FROM_RESOLVER'
-save_state(Path('STATE_DIR'), run)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" set-strategy --strategy STRATEGY_VALUE_FROM_RESOLVER
 ```
 
 Then branch by strategy:
@@ -246,7 +216,7 @@ After all questions are answered, re-dispatch the topic-resolver with the augmen
 prompt: {original input}
 clarifying_qa: {array of {question, answer} pairs}
 vault_root: {VAULT}
-scripts_dir: {SCRIPTS}
+repo: {REPO}
 ```
 
 Expect the new response to have `strategy: "unified"` (rare cases: `planning_only`).
@@ -254,20 +224,12 @@ Expect the new response to have `strategy: "unified"` (rare cases: `planning_onl
 **Re-persist the strategy from the second response.** The first dispatch persisted `"intent_planning"` in 2c; that value is now stale because the clarified resolver may have returned a different strategy.
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import load_run, save_state
-from pathlib import Path
-run = load_run(Path('STATE_DIR'))
-run['strategy'] = 'NEW_STRATEGY_FROM_SECOND_DISPATCH'
-save_state(Path('STATE_DIR'), run)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" set-strategy --strategy NEW_STRATEGY_FROM_SECOND_DISPATCH
 ```
 
 Then continue to 2e or Stage 3 accordingly.
 
-If the user abandons mid-Q&A (cancel / explicit abort), call `abandon_run(STATE_DIR)` and stop.
+If the user abandons mid-Q&A (cancel / explicit abort), run `rw.py abandon-run` and stop.
 
 ### 2e. Planning-only confirm (skip if strategy is unified)
 
@@ -278,26 +240,16 @@ Researching {project} at depth {topic.depth}, ~{estimated_minutes}min. Proceed? 
 ```
 
 - `yes`: initialize topics from the resolver response (see snippet below), then run Stage 2f, then skip to Stage 4 (hop loop). Stage 3 is bypassed. Strategy was already persisted in 2c.
-- `edit`: upgrade to `unified` strategy -- present the full plan as in Stage 3a below. The run is already created; Stage 3 will populate topics and approve. Also overwrite `run['strategy'] = 'unified'` since the user chose to upgrade.
-- `cancel`: call `abandon_run(STATE_DIR)` and stop.
+- `edit`: upgrade to `unified` strategy -- present the full plan as in Stage 3a below. The run is already created; Stage 3 will populate topics and approve. Also run `rw.py set-strategy --strategy unified` since the user chose to upgrade.
+- `cancel`: run `rw.py abandon-run` and stop.
 
 When `yes`: initialize topics now (since Stage 3 is being skipped), then advance the stage marker to `hop_loop` so a crash before Stage 4 resumes at the right place (not back at `triage`):
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import load_run, save_state, init_topic, update_stage
-from pathlib import Path
-state_dir = Path('STATE_DIR')
-run = load_run(state_dir)
-# RESOLVER_RESPONSE is the parsed JSON from Stage 2b/2d; substitute its topics list.
-plan_topics = RESOLVER_RESPONSE['topics']
-run['topics'] = [init_topic(t['topic'], t['mode'], t['depth']) for t in plan_topics]
-save_state(state_dir, run)
-update_stage(state_dir, 'hop_loop')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" init-topics --plan-file "STATE_DIR/resolver_response.json"
 ```
+
+`STATE_DIR/resolver_response.json` is the resolver's JSON response from Stage 2b/2d; write it with the Write tool first. `init-topics` creates one `init_topic` entry per `topics[]` item, saves the run, and sets the stage to `hop_loop`.
 
 Note: strategy persistence now happens once in Stage 2c (immediately after the resolver returns), so every path through Stage 2 ends with `run["strategy"]` set.
 
@@ -308,19 +260,10 @@ Note: strategy persistence now happens once in Stage 2c (immediately after the r
 Run via Bash:
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from learned_patterns import load_learned_patterns, filter_by_topic_text, group_by_stage
-from pathlib import Path
-lp, _warnings = load_learned_patterns(Path('LEARNED_PATTERNS_PATH'))
-relevant = filter_by_topic_text(lp, topics=TOPIC_STRINGS)
-grouped = group_by_stage(relevant)
-print(json.dumps({stage: [p.id for p in patterns] for stage, patterns in grouped.items()}))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" learned-patterns
 ```
 
-Substitute `LEARNED_PATTERNS_PATH` with `{VAULT}/.researcher/learned_patterns.md`. Substitute `TOPIC_STRINGS` with the list of topic strings from the resolver output (Stage 3's `final['topics']` -- use each topic's `topic` field).
+It reads `VAULT/.researcher/learned_patterns.md` and matches it against the topic strings already saved on the run in Stage 2e / 3b (each topic's `topic` field).
 
 **Why topic-text matching, not `domain_tags` matching at this stage:** v3.0.0 only derives `domain_tags` at case-write time (Stage 10c), computed from tags assigned to written notes. At Stage 2 no notes exist yet. Topic strings are the strongest signal we have for relevance. Stage 10d's analyzer uses real `domain_tags` from the just-written case via `filter_relevant`.
 
@@ -338,13 +281,7 @@ If the file doesn't exist or returns empty, set `LEARNED_BY_STAGE = {"search": [
 Stage 3 runs ONLY for `unified` strategy. The run was already created in Stage 2a and the resolver already dispatched in Stage 2b -- here we just present the plan and save the approval. Transition stage first:
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import update_stage
-from pathlib import Path
-update_stage(Path('STATE_DIR'), 'resolve')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" update-stage --stage resolve
 ```
 
 ### 3a. Present plan for approval
@@ -395,22 +332,10 @@ Wait for user response via the conversation:
 Initialize per-topic state using `init_topic` and save the research plan. The run already exists (created in Stage 2a), so we append topics to it rather than re-create:
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import load_run, save_state, init_topic, update_stage, save_stage_output
-from pathlib import Path
-state_dir = Path('STATE_DIR')
-run = load_run(state_dir)
-plan_topics = PLAN_JSON['topics']
-run['topics'] = [init_topic(t['topic'], t['mode'], t['depth']) for t in plan_topics]
-save_state(state_dir, run)
-update_stage(state_dir, 'hop_loop')
-save_stage_output(state_dir, 'research_plan', PLAN_JSON)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" init-topics --plan-file "STATE_DIR/resolver_response.json" --save-plan
 ```
 
-Where `PLAN_JSON` is the parsed JSON from the resolver, serialized as a Python dict literal.
+Where `STATE_DIR/resolver_response.json` holds the approved plan (the resolver's JSON; if the user edited the plan in 3a, write the edited version first). `--save-plan` also saves it as `research_plan.json`.
 
 Run Stage 2f before entering Stage 4.
 
