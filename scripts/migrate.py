@@ -25,7 +25,7 @@ console = Console()
 
 # The hidden vault state dir was named ".research-workflow" before the plugin
 # was renamed to "researcher". config_manager.CONFIG_DIR_NAME is now ".researcher".
-OLD_CONFIG_DIR_NAME = ".research-workflow"
+OLD_CONFIG_DIR_NAME = config_manager.OLD_CONFIG_DIR_NAME
 
 
 def migrate_vault_dir(vault_root: Path, dry_run: bool = False) -> str:

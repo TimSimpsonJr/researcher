@@ -80,7 +80,9 @@ def test_find_vault_accepts_pre_rename_dir(tmp_path):
     old.mkdir()
     (old / "config.json").write_text("{}", encoding="utf-8")
     assert find_vault(tmp_path / "sub" / "dir") == tmp_path
-    assert find_vault(tmp_path.parent) is None or find_vault(tmp_path.parent) != tmp_path
+    sibling = tmp_path.parent / (tmp_path.name + "-sibling")
+    sibling.mkdir()
+    assert find_vault(sibling) is None
 
 
 def test_migrate_renames_old_dir_keeps_stdout_json(tmp_path, cli, monkeypatch):
@@ -127,3 +129,9 @@ def test_vault_search_and_list_notes(vault, cli):
     assert cli("list-notes", "--folder", "Projects")[1] == ["Projects/Alpha.md"]
     assert cli("list-notes", "--folder", "Other")[1] == []
     assert cli("list-notes")[1] == ["Projects/Alpha.md"]
+    assert cli("list-notes", "--folder", "Proj")[1] == []  # prefix collision
+    (vault / "Projects" / "Sub").mkdir()
+    (vault / "Projects" / "Sub" / "B.md").write_text("---\ntitle: B\n---\nb\n", encoding="utf-8")
+    cli("update-index")
+    assert cli("list-notes", "--folder", "Projects/Sub")[1] == ["Projects/Sub/B.md"]
+    assert cli("list-notes", "--folder", "Projects\\Sub")[1] == ["Projects/Sub/B.md"]
