@@ -521,7 +521,7 @@ topic: {topic.topic}
 depth: {topic.depth}
 current_hop: {hop_level}
 max_hops: {topic.max_hops}
-confidence_target: {get_depth_profile(topic.depth)["confidence_target"]}
+confidence_target: {topic.depth's target: quick 0.6, standard 0.7, deep 0.8, exhaustive 0.9}
 summaries_so_far: {path to all summaries this topic has collected across all hops}
 sources_so_far: {path to all sources this topic has collected}
 hop_genealogy: {topic.hop_genealogy as JSON}
@@ -531,7 +531,7 @@ vault_root: {VAULT}
 repo: {REPO}
 ```
 
-**Learned-pattern injection (v3.1.0):** same shape as Stage 4a's learned-pattern injection, but for the hop-planner stage. If `LEARNED_BY_STAGE["hop_planner"]` is non-empty, load the full records with `rw.py learned-patterns --stage hop_planner`, append a `## Learned Patterns` block to the hop-planner's dispatch prompt under the existing context, then run `rw.py record-applied-pattern --pattern-id PATTERN_ID` once per surfaced pattern. See Stage 4a for the exact Bash commands.
+**Learned-pattern injection (v3.1.0):** same shape as Stage 4a's learned-pattern injection, but for the hop-planner stage. If `LEARNED_BY_STAGE["hop_planner"]` is non-empty, load the full records with `uv run --frozen --project "REPO" "REPO/scripts/rw.py" learned-patterns --stage hop_planner`, append a `## Learned Patterns` block to the hop-planner's dispatch prompt under the existing context, then run `uv run --frozen --project "REPO" "REPO/scripts/rw.py" record-applied-pattern --pattern-id PATTERN_ID` once per surfaced pattern. See Stage 4a for the exact Bash commands.
 
 Parse each hop-planner response. **Apply the full transition atomically via `apply_hop_decision()`** -- never via the per-field setters in this stage. The atomic helper persists genealogy + current_hop + confidence_history + contradiction_rate + next_hop / replan_hint / status in a single load -> mutate -> save cycle, so a crash partway through the transition cannot leave a topic with mismatched state (hop recorded but quality signals stale, status updated but routing stale, etc.).
 
@@ -568,7 +568,7 @@ After all topics have status != "active", compute the run-level quality signals 
 
 ### 5a. Compute per-topic pass/fail
 
-Each topic has its own depth and therefore its own `confidence_target` (via `get_depth_profile(topic.depth)["confidence_target"]`). Check per-topic, not run-aggregate:
+Each topic has its own depth and therefore its own `confidence_target` (quick 0.6, standard 0.7, deep 0.8, exhaustive 0.9). Check per-topic, not run-aggregate:
 
 ```bash
 uv run --frozen --project "REPO" "REPO/scripts/rw.py" quality-gate
@@ -710,7 +710,7 @@ Dispatch via the Task tool:
 }
 ```
 
-**Learned-pattern injection (v3.1.0):** same shape as Stage 4a's learned-pattern injection, but for the classify stage. If `LEARNED_BY_STAGE["classify"]` is non-empty, load the full records with `rw.py learned-patterns --stage classify`, append a `## Learned Patterns` block to the classify-agent's dispatch prompt under the existing JSON context, then run `rw.py record-applied-pattern --pattern-id PATTERN_ID` once per surfaced pattern. See Stage 4a for the exact Bash commands.
+**Learned-pattern injection (v3.1.0):** same shape as Stage 4a's learned-pattern injection, but for the classify stage. If `LEARNED_BY_STAGE["classify"]` is non-empty, load the full records with `uv run --frozen --project "REPO" "REPO/scripts/rw.py" learned-patterns --stage classify`, append a `## Learned Patterns` block to the classify-agent's dispatch prompt under the existing JSON context, then run `uv run --frozen --project "REPO" "REPO/scripts/rw.py" record-applied-pattern --pattern-id PATTERN_ID` once per surfaced pattern. See Stage 4a for the exact Bash commands.
 
 ### 6c. Parse classification
 
@@ -790,22 +790,7 @@ If the Librarian writer errors or is unexpectedly unavailable after the gate pas
 Stage 4 produces one `fetch_results_hop{N}.json` per hop. Before writing notes, merge them into a single url -> content lookup so 7c.iii (full-source-content recovery) doesn't have to re-glob and re-parse per note. **Write atomically via temp+rename** so a crash mid-write cannot leave a corrupt JSON file on disk — the Resume Flow only rebuilds when the file is missing or unparseable, not when it merely looks "present":
 
 ```bash
-python -c "
-import sys, json
-from pathlib import Path
-state_dir = Path('STATE_DIR')
-url_to_entry = {}
-for hf in sorted(state_dir.glob('fetch_results_hop*.json')):
-    data = json.loads(hf.read_text())
-    for entry in data.get('fetched', []):
-        # later hops win on URL collisions (same URL re-fetched gets the freshest content)
-        url_to_entry[entry['url']] = entry
-combined = {'fetched': list(url_to_entry.values()), 'by_url': url_to_entry}
-target = state_dir / 'fetch_results_aggregated.json'
-tmp = target.with_suffix('.tmp')
-tmp.write_text(json.dumps(combined, indent=2), encoding='utf-8')
-tmp.replace(target)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" aggregate-fetch-results
 ```
 
 The aggregated file has the same `{"fetched": [...]}` shape as the v2 monolithic `fetch_results.json`, plus a convenience `by_url` index for O(1) lookups. Stage 7c.iii reads from this file.
@@ -826,21 +811,10 @@ Writing Tier 1 first ensures that Tier 2 and Tier 3 notes can reference them wit
 Before writing, check if the target note already exists and was modified after the run started:
 
 ```bash
-python -c "
-import os, json
-from datetime import datetime, timezone
-path = 'VAULT/FOLDER/FILENAME'
-if os.path.exists(path):
-    mtime = os.path.getmtime(path)
-    run_start = datetime.fromisoformat('RUN_STARTED_AT')
-    if run_start.tzinfo is None:
-        run_start = run_start.replace(tzinfo=timezone.utc)
-    file_time = datetime.fromtimestamp(mtime, tz=timezone.utc)
-    print(json.dumps({'conflict': file_time > run_start, 'mtime': str(file_time)}))
-else:
-    print(json.dumps({'conflict': False, 'mtime': None}))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" check-mtime --path "VAULT/FOLDER/FILENAME"
 ```
+
+It compares the file's mtime with the run's `started_at` and prints `{"conflict": true | false, "mtime": "..." | null}`.
 
 If `conflict` is true:
 - Print a warning: `Skipping "{title}": file was modified after run started (mtime: {mtime}). Manual merge needed.`
@@ -943,25 +917,13 @@ If any contradiction in `classification.contradictions_detected` references a so
 
 Run via Bash:
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import append_written_note
-from pathlib import Path
-append_written_note(Path('STATE_DIR'), 'TOPIC', 'NOTE_PATH', 'MODEL')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" append-written-note --topic "TOPIC" --path "NOTE_PATH" --model MODEL
 ```
 
 #### viii. Update progress
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import update_stage
-from pathlib import Path
-update_stage(Path('STATE_DIR'), 'write', {'total_notes': TOTAL, 'completed': COMPLETED, 'current': 'CURRENT_TITLE'})
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" update-stage --stage write --total TOTAL --completed COMPLETED --current "CURRENT_TITLE"
 ```
 
 ### 7d. Update MOC files
@@ -979,26 +941,13 @@ After all notes are written:
 After all notes and MOCs are written, scan for wikilink opportunities between the new notes and existing project notes. Transition stage first:
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import update_stage
-from pathlib import Path
-update_stage(Path('STATE_DIR'), 'wikilink_scan')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" update-stage --stage wikilink_scan
 ```
 
 ### 8a. Refresh vault index
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from vault_index import update_index
-from pathlib import Path
-stats = update_index(Path('VAULT'))
-print(json.dumps(stats))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" update-index
 ```
 
 This ensures the newly written notes are indexed before the scanner queries the vault.
@@ -1013,14 +962,7 @@ Read the agent definition: `REPO/agents/wikilink-scanner.md`
 
 Load the written notes list:
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import load_stage_output
-from pathlib import Path
-written = load_stage_output(Path('STATE_DIR'), 'written_notes')
-print(json.dumps(written))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" load-stage-output --name written_notes
 ```
 
 Dispatch via the Task tool:
@@ -1033,7 +975,7 @@ Dispatch via the Task tool:
   "new_notes": [{list of {path, title} from written_notes}],
   "project_folder": "{project folder vault-relative path}",
   "vault_root": "VAULT",
-  "scripts_dir": "SCRIPTS"
+  "repo": "REPO"
 }
 ```
 
@@ -1061,13 +1003,7 @@ If no edits were needed, log: `Wikilink scan: no new wikilinks needed.`
 ### 8f. Update state
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import update_stage
-from pathlib import Path
-update_stage(Path('STATE_DIR'), 'discover')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" update-stage --stage discover
 ```
 
 ---
@@ -1080,14 +1016,7 @@ Read the agent definition: `REPO/agents/thread-discoverer.md`
 
 Load the written notes list:
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import load_stage_output
-from pathlib import Path
-written = load_stage_output(Path('STATE_DIR'), 'written_notes')
-print(json.dumps(written))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" load-stage-output --name written_notes
 ```
 
 Dispatch via the Task tool:
@@ -1101,7 +1030,7 @@ Dispatch via the Task tool:
   "summaries": {the summaries items from Stage 6},
   "written_notes": {written notes list},
   "vault_root": "VAULT",
-  "scripts_dir": "SCRIPTS"
+  "repo": "REPO"
 }
 ```
 
@@ -1140,19 +1069,12 @@ If threads are approved, save them to `STATE_DIR/approved_threads.json` for a fo
 ### 10a. Complete the run (capture final state)
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import complete_run
-from pathlib import Path
-final = complete_run(Path('STATE_DIR'))
-print(json.dumps(final))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" complete-run
 ```
 
 Parse the printed JSON. This is the FINAL run dict (with `completed_at` set). The state file has been moved to history at this point -- do NOT call `load_run` again.
 
-Write the `final` JSON to a temp file (e.g., `STATE_DIR/../tmp/final_run.json`) so Stage 10c can re-read it without depending on shell-variable passing.
+`complete-run` also saves `final` to `VAULT/.researcher/tmp/final_run.json`, which Stage 10c reads.
 
 ### 10b. Print summary
 
@@ -1209,83 +1131,37 @@ Sum across models for the estimate.
 
 ### 10c. Write case record
 
-Using the same `final` dict from 10a (do NOT re-read state -- it's archived already):
+Write the end-of-run inputs to `VAULT/.researcher/tmp/case_inputs.json` with the Write tool:
 
-```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import write_case_record
-from pathlib import Path
-cases_dir = Path('CASES_DIR')
-
-# 'final' was captured from complete_run() in stage 10a; pass it via stdin or a temp file
-import json as _json
-final = _json.loads(open('FINAL_JSON_TEMP_FILE').read())
-
-case = {
-    'case_id': final['run_id'],
-    'version': 1,
-    'query': 'PROJECT_NAME',
-    'domain_tags': DERIVED_TAGS,
-    'strategy_used': final.get('strategy', 'unified'),
-    'depths_used': {d: sum(1 for t in final['topics'] if t.get('depth') == d)
-                    for d in ['quick','standard','deep','exhaustive']},
-    'hops_executed': sum(len(t.get('hop_genealogy', [])) for t in final['topics']),
-    'confidence_per_topic': {t['topic']: (t['confidence_history'][-1] if t.get('confidence_history') else None)
-                             for t in final['topics']},
-    'contradiction_rate': max((t.get('contradiction_rate', 0.0) for t in final['topics']), default=0.0),
-    'patterns_that_worked': PATTERNS_WORKED,
-    'patterns_that_failed': PATTERNS_FAILED,
-    'applied_patterns': final.get('applied_patterns', []),
-    'outcomes': {
-        'sources_processed': SOURCES_COUNT,
-        'notes_created': CREATED_COUNT,
-        'notes_updated': UPDATED_COUNT,
-        'user_decisions': final.get('user_decisions', []),
-    },
+```json
+{
+  "query": "PROJECT_NAME",
+  "domain_tags": DERIVED_TAGS,
+  "patterns_that_worked": PATTERNS_WORKED,
+  "patterns_that_failed": PATTERNS_FAILED,
+  "sources_processed": SOURCES_COUNT,
+  "notes_created": CREATED_COUNT,
+  "notes_updated": UPDATED_COUNT
 }
-write_case_record(cases_dir, case)
-"
 ```
 
-The orchestrator writes `final` to a temp JSON file between 10a and 10c (typical pattern: write the captured JSON to `STATE_DIR/../tmp/final_run.json` for the duration of 10b/10c, then delete). DERIVED_TAGS comes from the most common tags across written notes. PATTERNS_WORKED / PATTERNS_FAILED come from per-hop telemetry (patterns that produced novel notes vs. dead ends).
+Then:
+
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" write-case-record --inputs-file "VAULT/.researcher/tmp/case_inputs.json"
+```
+
+`write-case-record` reads `final` from `VAULT/.researcher/tmp/final_run.json` and builds the case record with `state.build_case_record`: `case_id` (the run_id), the strategy, per-depth topic counts, hops executed, per-topic confidence, the max contradiction rate, the run's `applied_patterns` and its user decisions, plus the inputs above. It prints `{"case_path": ...}`. DERIVED_TAGS comes from the most common tags across written notes. PATTERNS_WORKED / PATTERNS_FAILED come from per-hop telemetry (patterns that produced novel notes vs. dead ends). Each is a JSON object of this shape, which the Stage 10d pattern detectors read: `source_tiers` (object mapping source tier to its share of sources), `hop_chain` (array of hop pattern names), `queries` (array of query templates), and optionally `notes` (array or string of free text). Omit keys you have no data for; a bare list or string is wrapped under `notes` as a fallback.
 
 ### 10d. Run case analyzer (v3.1.0)
 
 Run via Bash:
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from case_analyzer import analyze
-from pathlib import Path
-from state import acquire_state_lock
-
-with acquire_state_lock(Path('STATE_ROOT_FOR_VAULT')):
-    result = analyze(
-        case_path=Path('CASE_PATH'),
-        accumulator_path=Path('ACCUMULATOR_PATH'),
-        learned_patterns_path=Path('LEARNED_PATTERNS_PATH'),
-        cases_dir=Path('CASES_DIR'),
-    )
-print(json.dumps({
-    'promotion_candidates': [
-        {'pattern_id': c.pattern_id, 'name': c.name,
-         'proposed_promotion_body': c.proposed_promotion_body,
-         'evidence': c.evidence}
-        for c in result.promotion_candidates
-    ],
-    'contradictions': result.contradictions,
-    'warnings': result.warnings,
-    'score_updates_applied': result.score_updates_applied,
-    'demotions_applied': result.demotions_applied,
-}))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" analyze-case --case-path "CASE_PATH"
 ```
 
-Substitute `STATE_ROOT_FOR_VAULT` with `{VAULT}/.researcher/`, `CASE_PATH` with the path to the just-written case JSON (under `{VAULT}/.researcher/cases/`), `ACCUMULATOR_PATH` with `{VAULT}/.researcher/accumulator.json`, `LEARNED_PATTERNS_PATH` with `{VAULT}/.researcher/learned_patterns.md`, and `CASES_DIR` with `{VAULT}/.researcher/cases/`.
+Substitute `CASE_PATH` with the `case_path` printed by `write-case-record`. `analyze-case` holds `acquire_state_lock` on `VAULT/.researcher/` while it runs `case_analyzer.analyze` against `VAULT/.researcher/accumulator.json`, `learned_patterns.md` and `cases/`.
 
 Parse the JSON output.
 
@@ -1357,106 +1233,28 @@ Promote / Reject / Hold?
 
 Use the user's response:
 
-All three branches below acquire `acquire_state_lock` around the shared-state writes. This is the same lock Stage 10d uses -- without it, concurrent `/researcher` runs (background + foreground) could race on `accumulator.json` and `learned_patterns.md` and lose updates. `STATE_ROOT_FOR_VAULT` is `{VAULT}/.researcher/`.
+All three branches below acquire `acquire_state_lock` around the shared-state writes. This is the same lock Stage 10d uses -- without it, concurrent `/researcher` runs (background + foreground) could race on `accumulator.json` and `learned_patterns.md` and lose updates. The lock root is `VAULT/.researcher/`.
 
-**Precondition for all three branches:** Stage 10d already verified that BOTH `learned_patterns.md` AND `accumulator.json` are parseable (no `learned_patterns_*` and no `accumulator_*` warnings) BEFORE letting control reach Stage 10e. If any such warning was present, Stage 10d skipped 10e entirely. So inside each branch we can assume the loaders return a usable file -- but every branch still defends against late corruption by checking warnings before saving (`BRANCH_ABORTED` on mismatch). The Reject and Hold branches would otherwise silently overwrite a recoverable corrupt accumulator with empty content.
+**Precondition for all three branches:** Stage 10d already verified that BOTH `learned_patterns.md` AND `accumulator.json` are parseable (no `learned_patterns_*` and no `accumulator_*` warnings) BEFORE letting control reach Stage 10e. If any such warning was present, Stage 10d skipped 10e entirely. So inside each branch we can assume the loaders return a usable file -- but every branch still defends against late corruption by checking warnings before saving (`BRANCH_ABORTED` on mismatch). The Reject and Hold branches would otherwise silently overwrite a recoverable corrupt accumulator with empty content. Each command prints `{"status": "promoted" | "rejected" | "held"}`, or `{"status": "aborted"}` plus a `BRANCH_ABORTED: ...` line on stderr when it refused to save over a store that loaded with warnings.
 
 **Promote:**
 
 ```bash
-python -c "
-import sys; sys.path.insert(0, 'SCRIPTS')
-from accumulator import load_accumulator, save_accumulator, remove_entry
-from learned_patterns import (
-    load_learned_patterns, save_learned_patterns, LearnedPattern
-)
-from datetime import datetime, timezone
-from pathlib import Path
-from state import acquire_state_lock
-
-with acquire_state_lock(Path('STATE_ROOT_FOR_VAULT')):
-    lp, lp_warnings = load_learned_patterns(Path('LEARNED_PATTERNS_PATH'))
-    if lp_warnings:
-        # Refuse to clobber a corrupt/incompatible file even if Stage 10d
-        # missed the gate (defense in depth). Log and bail.
-        import sys as _sys
-        print(f'BRANCH_ABORTED: refusing to save over corrupt learned_patterns.md: {lp_warnings}', file=_sys.stderr)
-        _sys.exit(0)
-    acc, acc_warnings = load_accumulator(Path('ACCUMULATOR_PATH'))
-    if acc_warnings:
-        # Same defense for the accumulator side -- without this check the
-        # next(...) lookup below would raise StopIteration on the empty
-        # fallback, masking the real failure with an opaque crash.
-        import sys as _sys
-        print(f'BRANCH_ABORTED: refusing to save over corrupt accumulator.json: {acc_warnings}', file=_sys.stderr)
-        _sys.exit(0)
-    entry = next(e for e in acc.entries if e.pattern_id == 'PATTERN_ID')
-    # Skip if already in learned_patterns (cross-file transaction recovery --
-    # prior promotion wrote learned_patterns but failed to update accumulator)
-    if not any(p.id == entry.pattern_id for p in lp.patterns):
-        lp.patterns.append(LearnedPattern(
-            id=entry.pattern_id,
-            name=entry.name,
-            body=entry.proposed_promotion_body,
-            domain_tags=entry.domain_tags,
-            target_stage=entry.target_stage,
-            category=entry.category,
-            wins=0, losses=0,
-            promoted_at=datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-            demotion_count=entry.demotion_count,
-        ))
-        # Write order: learned_patterns FIRST, then accumulator
-        save_learned_patterns(Path('LEARNED_PATTERNS_PATH'), lp)
-    remove_entry(acc, 'PATTERN_ID')
-    save_accumulator(Path('ACCUMULATOR_PATH'), acc)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" promote-pattern --pattern-id PATTERN_ID
 ```
+
+Write order is `learned_patterns.md` first, then `accumulator.json`; a pattern id already in `learned_patterns.md` is not added twice (recovery from a promotion that wrote one file but not the other).
 
 **Reject:**
 
 ```bash
-python -c "
-import sys; sys.path.insert(0, 'SCRIPTS')
-from accumulator import load_accumulator, save_accumulator, mark_rejected
-from pathlib import Path
-from state import acquire_state_lock
-
-with acquire_state_lock(Path('STATE_ROOT_FOR_VAULT')):
-    acc, acc_warnings = load_accumulator(Path('ACCUMULATOR_PATH'))
-    if acc_warnings:
-        # Defense in depth: Stage 10d should have skipped 10e if the
-        # accumulator was corrupt, but without this guard a `mark_rejected`
-        # + `save_accumulator` on the empty fallback would clobber the
-        # recoverable corrupt file with empty content.
-        import sys as _sys
-        print(f'BRANCH_ABORTED: refusing to save over corrupt accumulator.json: {acc_warnings}', file=_sys.stderr)
-        _sys.exit(0)
-    mark_rejected(acc, 'PATTERN_ID')
-    save_accumulator(Path('ACCUMULATOR_PATH'), acc)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" reject-pattern --pattern-id PATTERN_ID
 ```
 
 **Hold:**
 
 ```bash
-python -c "
-import sys; sys.path.insert(0, 'SCRIPTS')
-from accumulator import load_accumulator, save_accumulator, clear_promotion_pending
-from pathlib import Path
-from state import acquire_state_lock
-
-with acquire_state_lock(Path('STATE_ROOT_FOR_VAULT')):
-    acc, acc_warnings = load_accumulator(Path('ACCUMULATOR_PATH'))
-    if acc_warnings:
-        # Same defense as Reject -- a `clear_promotion_pending` +
-        # `save_accumulator` on the empty fallback would clobber the
-        # recoverable corrupt file with empty content.
-        import sys as _sys
-        print(f'BRANCH_ABORTED: refusing to save over corrupt accumulator.json: {acc_warnings}', file=_sys.stderr)
-        _sys.exit(0)
-    clear_promotion_pending(acc, 'PATTERN_ID')
-    save_accumulator(Path('ACCUMULATOR_PATH'), acc)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" hold-pattern --pattern-id PATTERN_ID
 ```
 
 If the user aborts (Ctrl+C, dismisses, walks away), do nothing. The `promotion_pending` flag remains set on the accumulator entry, and next-run Stage 10e will re-prompt.
@@ -1498,11 +1296,7 @@ Proceed? [yes / no / switch to inline]
 
 ### 4B.2 Dispatch the workflow
 
-Determine the full Python path (the batch's `fetch-summarize-runner` needs it — nothing is on PATH):
-```bash
-python -c "import sys; print(sys.executable)"
-```
-Create the scratch dir `STATE_DIR/batch_scratch` (the runner writes intermediates under unique per-topic-hop subdirs). Build a compact `vaultDigest` of `{title, tags, path}` from the vault index (cap ~1500 most-recent) for novelty resolution.
+The batch's `fetch-summarize-runner` runs the fetch/summarize scripts with `uv run --frozen --project` against `repo`, so pass `REPO` in the config. Create the scratch dir `STATE_DIR/batch_scratch` (the runner writes intermediates under unique per-topic-hop subdirs). Build a compact `vaultDigest` of `{title, tags, path}` from the vault index (cap ~1500 most-recent) for novelty resolution.
 
 Record a lightweight **approve** run marker in `STATE_DIR`. Then call the **Workflow tool** (the skill instruction is your opt-in to use it):
 ```
@@ -1511,7 +1305,7 @@ Workflow({
   args: {
     plan: <approved resolver plan: project + topics[{topic, mode, depth}]>,
     config: {
-      vault_root: VAULT, scripts_dir: SCRIPTS, python_path: <sys.executable>,
+      vault_root: VAULT, repo: REPO,
       ollama_model: RECOMMENDED_MODEL,   // null at base tier
       tier: TIER, work_dir: "STATE_DIR/batch_scratch",
       outputMode: "vault", vaultDigest: <digest>
@@ -1575,5 +1369,5 @@ When resuming a run (Stage 1 detected an active run and the user chose "Resume")
    - `classification.json` (from Stage 6d)
    - `fetch_results_aggregated.json` (from Stage 7a -- regenerate if missing OR if loading it raises `JSONDecodeError` on resume into the write stage)
    - `written_notes.json` (from Stage 7)
-3. Skip to the recorded stage. For the `hop_loop` stage, the topics' `current_hop` and `status` fields determine which active topics still need processing -- only un-completed topics dispatch through Stage 4 again. For the `write` stage specifically, check `written_notes.json` to determine which notes are already complete and skip them. If `fetch_results_aggregated.json` is missing OR `json.loads()` on its contents raises `JSONDecodeError` (the prior run crashed mid-write before the temp+rename completed), re-run the Stage 7a aggregation snippet -- it's a pure function of the existing per-hop files, so regeneration is safe.
+3. Skip to the recorded stage. For the `hop_loop` stage, the topics' `current_hop` and `status` fields determine which active topics still need processing -- only un-completed topics dispatch through Stage 4 again. For the `write` stage specifically, check `written_notes.json` to determine which notes are already complete and skip them. If `fetch_results_aggregated.json` is missing OR `json.loads()` on its contents raises `JSONDecodeError` (the prior run crashed mid-write before the temp+rename completed), re-run Stage 7a's `aggregate-fetch-results` -- it's a pure function of the existing per-hop files, so regeneration is safe.
 4. Continue the pipeline from that point.

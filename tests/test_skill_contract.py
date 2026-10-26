@@ -9,7 +9,8 @@ these fields will fail the contract test.
 
 These tests are regressions for the codex impl-review findings on v3.1.0
 case-based pattern learning:
-- score-loop cluster: Stage 10c case dict must include `applied_patterns`
+- score-loop cluster: the Stage 10c case record must include `applied_patterns`
+  (now built by state.build_case_record behind rw.py write-case-record)
 - graduation-write-path cluster: Stage 10d/10e must defend against
   accumulator_* warnings in addition to learned_patterns_* warnings.
 """
@@ -20,19 +21,18 @@ from pathlib import Path
 _SKILL_MD = Path(__file__).parent.parent / "skills" / "researcher" / "SKILL.md"
 
 
-def test_skill_md_stage_10c_includes_applied_patterns_in_case_dict():
-    """SKILL.md Stage 10c case-dict assembly must include 'applied_patterns' field.
-
-    Without it, the score/demotion loop in Stage 10d's analyzer is a no-op in
-    production (case.get('applied_patterns', []) returns []). Regression for
+def test_skill_md_stage_10c_case_record_carries_applied_patterns():
+    """Stage 10c builds the case via rw.py write-case-record ->
+    state.build_case_record, which must carry the run's applied_patterns.
+    Without it the Stage 10d score/demotion loop is a no-op in production
+    (case.get('applied_patterns', []) returns []). Regression for
     codex-impl-review finding score-loop cluster.
     """
+    from state import build_case_record
     text = _SKILL_MD.read_text(encoding="utf-8")
-    # Find the Stage 10c block — anchor on the write_case_record reference
-    assert "write_case_record" in text, "Stage 10c must reference write_case_record"
-    # The case dict assembly must include applied_patterns sourced from final
-    assert "'applied_patterns':" in text, \
-        "Stage 10c case dict must include 'applied_patterns' field"
+    assert "write-case-record" in text, "Stage 10c must call rw.py write-case-record"
+    case = build_case_record({"run_id": "r1", "topics": [], "applied_patterns": ["p1"]}, {"query": "q"})
+    assert case["applied_patterns"] == ["p1"]
 
 
 def test_skill_md_stage_10d_gates_on_accumulator_warnings():
@@ -51,14 +51,13 @@ def test_skill_md_stage_10d_gates_on_accumulator_warnings():
     assert "accumulator_" in context, "gate must mention accumulator_* warnings"
 
 
-def test_skill_md_stage_10e_all_branches_check_acc_warnings():
-    """All three Stage 10e branches (Promote, Reject, Hold) must check
-    acc_warnings before saving the accumulator. Without this defense-in-depth,
-    a corrupt accumulator could be overwritten with empty content.
+def test_skill_md_stage_10e_branches_use_guarded_commands():
+    """All three Stage 10e branches (Promote, Reject, Hold) run rw.py
+    promote-/reject-/hold-pattern, whose case_analyzer functions refuse to
+    save over a corrupt store (BRANCH_ABORTED). The refusal itself is
+    tested in tests/test_rw_cli.py.
     """
     text = _SKILL_MD.read_text(encoding="utf-8")
-    # Each branch has its own ```bash block; each block must mention acc_warnings handling
-    # Heuristic: count "BRANCH_ABORTED" occurrences — should be >= 3 (one per branch)
-    aborted_count = text.count("BRANCH_ABORTED")
-    assert aborted_count >= 3, \
-        f"expected acc_warnings check in all 3 Stage 10e branches, found {aborted_count} BRANCH_ABORTED markers"
+    for cmd in ("promote-pattern", "reject-pattern", "hold-pattern"):
+        assert f'rw.py" {cmd} --pattern-id' in text, f"Stage 10e must call rw.py {cmd}"
+    assert "BRANCH_ABORTED" in text
