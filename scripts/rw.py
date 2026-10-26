@@ -375,15 +375,20 @@ def _final_path(args) -> Path:
 
 def cmd_complete_run(args):
     final = complete_run(_state_dir(args))
+    path = _final_path(args)
     if final is not None:
-        path = _final_path(args)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(final, indent=2, ensure_ascii=False), encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)  # never leave a stale final for write-case-record
     _out(final)
 
 
 def cmd_write_case_record(args):
-    final = _read_json(args.final_file or _final_path(args))
+    final_path = Path(args.final_file) if args.final_file else _final_path(args)
+    if not final_path.is_file():
+        raise CLIError(f"{final_path} not found; run complete-run first")
+    final = _read_json(final_path)
     case = build_case_record(final, _read_json(args.inputs_file))
     cases_dir = _researcher_dir(args) / "cases"
     write_case_record(cases_dir, case)

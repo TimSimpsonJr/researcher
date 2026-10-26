@@ -622,6 +622,21 @@ def test_complete_run_without_run_prints_null(vault, cli):
     assert not (vault / ".researcher" / "tmp" / "final_run.json").exists()
 
 
+def test_complete_run_without_run_deletes_stale_final(vault, cli):
+    stale = vault / ".researcher" / "tmp" / "final_run.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}", encoding="utf-8")
+    code, out, _ = cli("complete-run")
+    assert code == 0 and out is None
+    assert not stale.exists()
+
+
+def test_write_case_record_missing_final_errors(vault, cli):
+    inputs = _write(vault / "case_inputs.json", {"query": "q"})
+    code, _, err = cli("write-case-record", "--inputs-file", inputs)
+    assert code == 1 and "final_run.json" in err
+
+
 def test_write_case_record_builds_case_from_final(active_run, cli):
     cli("record-applied-pattern", "--pattern-id", "p1")
     cli("set-strategy", "--strategy", "unified")
