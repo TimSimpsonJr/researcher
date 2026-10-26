@@ -14,7 +14,7 @@ Related: the skill's `{{REPO_ROOT}}` and `{{VAULT_ROOT}}` placeholders, and setu
 
 ## Decision
 
-Run all plugin Python through **`uv run --project <plugin root>`** against a shipped `pyproject.toml` + `uv.lock`, and replace the inline `python -c` blocks with subcommands of one CLI, `scripts/rw.py`. uv becomes a hard requirement.
+Run all plugin Python through **`uv run --frozen --project <plugin root>`** against a shipped `pyproject.toml` + `uv.lock`, and replace the inline `python -c` blocks with subcommands of one CLI, `scripts/rw.py`. uv becomes a hard requirement.
 
 Rejected alternatives:
 - *Setup-created venv recorded in vault config:* needs Python to read the config before it knows which Python to use; unpinned deps; stale when the venv or base interpreter changes.
@@ -28,6 +28,10 @@ Rejected alternatives:
 - Commit `uv.lock`. Delete `requirements.txt` so dependencies are declared once.
 - yt-dlp and openai-whisper stay optional and outside the lock; setup keeps offering to install them (now via `uv pip install` into the project env, or `uv tool install yt-dlp`).
 - First `uv run` in a fresh plugin cache creates `.venv` inside the plugin folder from the lock; a plugin update gets a fresh folder and uv rebuilds it automatically.
+
+### 1b. Frozen lock
+
+Every runtime invocation uses `uv run --frozen` (and setup uses `uv sync --frozen`). uv records the resolving machine's `exclude-newer` / `exclude-newer-span` settings in `uv.lock` and treats the lock as stale on any machine whose settings differ, so without `--frozen` a user's first run would silently re-resolve, rewrite `uv.lock` in the plugin cache and install the newest versions. `--frozen` installs exactly the locked set. Maintainers update the lock deliberately with `uv lock`.
 
 ### 2. Locating the plugin and the vault
 
@@ -45,10 +49,10 @@ Rejected alternatives:
 
 ### 4. Skill and agent edits
 
-- At the top of `skills/researcher/SKILL.md`: the REPO rule, the invocation pattern `RW="uv run --project \"$REPO\" scripts/rw.py"` (written out literally in each call, since shell vars don't persist between Bash calls), and a Stage 0 uv check (`uv --version`; if missing, stop with install instructions for Windows/macOS/Linux).
-- Every inline block becomes a single-line call: `uv run --project "$REPO" "$REPO/scripts/rw.py" <cmd> ...`. Existing scripts: `uv run --project "$REPO" "$REPO/scripts/fetch_and_clean.py" --input ...` (same for summarize, fetch_media, search_searxng, extract_local, produce_output).
+- At the top of `skills/researcher/SKILL.md`: the REPO rule, the invocation pattern `RW="uv run --frozen --project \"$REPO\" scripts/rw.py"` (written out literally in each call, since shell vars don't persist between Bash calls), and a Stage 0 uv check (`uv --version`; if missing, stop with install instructions for Windows/macOS/Linux).
+- Every inline block becomes a single-line call: `uv run --frozen --project "$REPO" "$REPO/scripts/rw.py" <cmd> ...`. Existing scripts: `uv run --frozen --project "$REPO" "$REPO/scripts/fetch_and_clean.py" --input ...` (same for summarize, fetch_media, search_searxng, extract_local, produce_output).
 - Agents (`classify-agent`, `hop-planner`, `thread-discoverer`, `topic-resolver`, `wikilink-scanner`): same conversion; the orchestrator passes `repo` in the dispatch payload instead of `scripts_dir` + implicit python.
-- `skills/researcher-setup/SKILL.md`: drop `{{PYTHON_PATH}}`; check for uv; run `uv sync --project "$REPO"` once to warm the env; optional-tool installs via uv.
+- `skills/researcher-setup/SKILL.md`: drop `{{PYTHON_PATH}}`; check for uv; run `uv sync --frozen --project "$REPO"` once to warm the env; optional-tool installs via uv.
 - Batch workflow (`lib/` research-batch and `fetch-summarize-runner` agent): replace `python_path: <sys.executable>` with the uv invocation (pass `repo`; the runner builds the command).
 - README: requirements (uv, Python 3.12 fetched by uv if absent), dev setup (`uv sync`, `uv run pytest`). MANIFEST: add `rw.py`, `pyproject.toml`, `uv.lock`; drop `requirements.txt`.
 
@@ -56,7 +60,7 @@ Rejected alternatives:
 
 - `tests/test_rw_cli.py`: for each subcommand, run it against a temp vault (fixture creating `.researcher/config.json` + state dir) via `main([...])` and assert the JSON output and the resulting state. Use monkeypatch to stub network-touching calls (`detect-tier`).
 - `tests/test_skill_contract.py` (extend): fail if `skills/**/SKILL.md`, `agents/*.md` or `lib/**` contain `python -c`, a bare `python ` / `python3 ` command outside fenced explanatory prose, a `{{REPO_ROOT}}` / `{{VAULT_ROOT}}` / `{{PYTHON_PATH}}` placeholder, or an `rw.py` subcommand name that rw.py does not define (parse subcommands from the argparse parser).
-- Full suite passes with `uv run --project . pytest` from the repo root.
+- Full suite passes with `uv run --frozen --project . pytest` from the repo root.
 
 ### 6. Out of scope
 
