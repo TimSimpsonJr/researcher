@@ -229,7 +229,7 @@ uv run --frozen --project "REPO" "REPO/scripts/rw.py" set-strategy --strategy NE
 
 Then continue to 2e or Stage 3 accordingly.
 
-If the user abandons mid-Q&A (cancel / explicit abort), run `rw.py abandon-run` and stop.
+If the user abandons mid-Q&A (cancel / explicit abort), run `uv run --frozen --project "REPO" "REPO/scripts/rw.py" abandon-run` and stop.
 
 ### 2e. Planning-only confirm (skip if strategy is unified)
 
@@ -240,8 +240,8 @@ Researching {project} at depth {topic.depth}, ~{estimated_minutes}min. Proceed? 
 ```
 
 - `yes`: initialize topics from the resolver response (see snippet below), then run Stage 2f, then skip to Stage 4 (hop loop). Stage 3 is bypassed. Strategy was already persisted in 2c.
-- `edit`: upgrade to `unified` strategy -- present the full plan as in Stage 3a below. The run is already created; Stage 3 will populate topics and approve. Also run `rw.py set-strategy --strategy unified` since the user chose to upgrade.
-- `cancel`: run `rw.py abandon-run` and stop.
+- `edit`: upgrade to `unified` strategy -- present the full plan as in Stage 3a below. The run is already created; Stage 3 will populate topics and approve. Also run `uv run --frozen --project "REPO" "REPO/scripts/rw.py" set-strategy --strategy unified` since the user chose to upgrade.
+- `cancel`: run `uv run --frozen --project "REPO" "REPO/scripts/rw.py" abandon-run` and stop.
 
 When `yes`: initialize topics now (since Stage 3 is being skipped), then advance the stage marker to `hop_loop` so a crash before Stage 4 resumes at the right place (not back at `triage`):
 
@@ -439,19 +439,10 @@ HOP CONTEXT: This is hop {N} of {max_hops} for topic "{topic}". Use the {pattern
 **Learned-pattern injection (v3.1.0):** if `LEARNED_BY_STAGE["search"]` is non-empty, ALSO load each pattern's full record and append a `## Learned Patterns` block to the search-agent prompt:
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from learned_patterns import load_learned_patterns
-from pathlib import Path
-lp, _warnings = load_learned_patterns(Path('LEARNED_PATTERNS_PATH'))
-ids = LEARNED_IDS_FOR_STAGE
-out = [{'id': p.id, 'name': p.name, 'body': p.body} for p in lp.patterns if p.id in ids]
-print(json.dumps(out))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" learned-patterns --stage search
 ```
 
-Substitute `LEARNED_PATTERNS_PATH` with `{VAULT}/.researcher/learned_patterns.md` and pass `LEARNED_IDS_FOR_STAGE` as the list `LEARNED_BY_STAGE["search"]`.
+It prints `[{id, name, body}]` for the run's `search`-stage patterns, the records behind `LEARNED_BY_STAGE["search"]`.
 
 Build a `## Learned Patterns` block from the returned records (4-space indented to show the literal markdown the orchestrator emits):
 
@@ -464,12 +455,7 @@ Build a `## Learned Patterns` block from the returned records (4-space indented 
 Append this block to the search-agent's user prompt under the existing context. Then, for each pattern surfaced, record it in run state:
 
 ```bash
-python -c "
-import sys; sys.path.insert(0, 'SCRIPTS')
-from state import record_applied_pattern
-from pathlib import Path
-record_applied_pattern(Path('STATE_DIR'), 'PATTERN_ID')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" record-applied-pattern --pattern-id PATTERN_ID
 ```
 
 Run once per pattern id.
@@ -483,19 +469,13 @@ After dispatch, collect all `selected_urls` arrays from the search agent respons
 Run `fetch_and_clean.py` once for all active topics' selected URLs at this hop:
 
 ```bash
-python "SCRIPTS/fetch_and_clean.py" --input "STATE_DIR/search_context_hop{N}.json" --output "STATE_DIR/fetch_results_hop{N}.json"
+uv run --frozen --project "REPO" "REPO/scripts/fetch_and_clean.py" --input "STATE_DIR/search_context_hop{N}.json" --output "STATE_DIR/fetch_results_hop{N}.json"
 ```
 
 Update each topic's `seen_urls` with the URLs that were successfully fetched, using the `add_seen_urls` state helper. For each topic, pass the list of URLs that ended up in `fetch_results_hop{N}.fetched` (i.e., the URLs that actually returned content, not the failed ones):
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import add_seen_urls
-from pathlib import Path
-add_seen_urls(Path('STATE_DIR'), topic_name='TOPIC', urls=URLS_FETCHED_FOR_TOPIC)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" add-seen-urls --topic "TOPIC" --urls "URL_1" "URL_2"
 ```
 
 The helper dedupes — calling it again with overlapping URLs (e.g., the same URL appears in multiple hops) is safe.
@@ -507,7 +487,7 @@ The helper dedupes — calling it again with overlapping URLs (e.g., the same UR
 Before invoking `fetch_media.py`, split this hop's `fetch_results_hop{N}.json` into per-article content files. For each entry in `fetched`, write its `content` field to `STATE_DIR/content_hop{N}_{index}.md` (where `{index}` is the 0-based index of the article in `fetched`). Then run `fetch_media.py` per article:
 
 ```bash
-python "SCRIPTS/fetch_media.py" --content "STATE_DIR/content_hop{N}_{index}.md" --assets-dir "ASSETS_DIR" --topic "{topic_slug}" --run-id "{RUN_ID}" --output "STATE_DIR/rewritten_hop{N}_{index}.md"
+uv run --frozen --project "REPO" "REPO/scripts/fetch_media.py" --content "STATE_DIR/content_hop{N}_{index}.md" --assets-dir "ASSETS_DIR" --topic "{topic_slug}" --run-id "{RUN_ID}" --output "STATE_DIR/rewritten_hop{N}_{index}.md"
 ```
 
 Replace the original `content` in `fetch_results_hop{N}` with the rewritten content from the output files.
@@ -518,12 +498,12 @@ Run `summarize.py` over the hop's fetch_results. Write to `summaries_hop{N}.json
 
 **If Ollama is available (mid or full tier):**
 ```bash
-python "SCRIPTS/summarize.py" --input "STATE_DIR/fetch_results_hop{N}.json" --model "RECOMMENDED_MODEL" --output "STATE_DIR/summaries_hop{N}.json"
+uv run --frozen --project "REPO" "REPO/scripts/summarize.py" --input "STATE_DIR/fetch_results_hop{N}.json" --model "RECOMMENDED_MODEL" --output "STATE_DIR/summaries_hop{N}.json"
 ```
 
 **If Ollama is NOT available (base tier):**
 ```bash
-python "SCRIPTS/summarize.py" --input "STATE_DIR/fetch_results_hop{N}.json" --prepare-for-claude --output-dir "STATE_DIR/summaries_hop{N}/"
+uv run --frozen --project "REPO" "REPO/scripts/summarize.py" --input "STATE_DIR/fetch_results_hop{N}.json" --prepare-for-claude --output-dir "STATE_DIR/summaries_hop{N}/"
 ```
 
 Then dispatch a Haiku subagent per article file (same prompt as v2 base-tier path), collect into `summaries_hop{N}.json` with shape `{"topic": "{project name}", "items": [...]}`. Leave each summary's `media_refs` empty -- media assets are already inlined into the rewritten article content as Obsidian embeds during Stage 4c, so the write stage picks them up directly from the per-hop fetch_results without needing a separate manifest.
@@ -547,38 +527,21 @@ sources_so_far: {path to all sources this topic has collected}
 hop_genealogy: {topic.hop_genealogy as JSON}
 seen_urls: {topic.seen_urls}
 vault_index_path: {VAULT}/.researcher/vault_index.db
-scripts_dir: SCRIPTS
+vault_root: {VAULT}
+repo: {REPO}
 ```
 
-**Learned-pattern injection (v3.1.0):** same shape as Stage 4a's learned-pattern injection, but for the hop-planner stage. If `LEARNED_BY_STAGE["hop_planner"]` is non-empty, load each pattern's full record via `load_learned_patterns` (filter by the IDs in `LEARNED_BY_STAGE["hop_planner"]`), append a `## Learned Patterns` block to the hop-planner's dispatch prompt under the existing context, then call `record_applied_pattern(STATE_DIR, pattern_id)` once per surfaced pattern. See Stage 4a for the exact Bash snippets to reuse.
+**Learned-pattern injection (v3.1.0):** same shape as Stage 4a's learned-pattern injection, but for the hop-planner stage. If `LEARNED_BY_STAGE["hop_planner"]` is non-empty, load the full records with `rw.py learned-patterns --stage hop_planner`, append a `## Learned Patterns` block to the hop-planner's dispatch prompt under the existing context, then run `rw.py record-applied-pattern --pattern-id PATTERN_ID` once per surfaced pattern. See Stage 4a for the exact Bash commands.
 
 Parse each hop-planner response. **Apply the full transition atomically via `apply_hop_decision()`** -- never via the per-field setters in this stage. The atomic helper persists genealogy + current_hop + confidence_history + contradiction_rate + next_hop / replan_hint / status in a single load -> mutate -> save cycle, so a crash partway through the transition cannot leave a topic with mismatched state (hop recorded but quality signals stale, status updated but routing stale, etc.).
 
+Write this topic's hop-planner response to `STATE_DIR/hop_response_{topic_slug}.json`, and the just-completed hop's record (hop number, pattern, queries, sources_kept, ended_at, ...) to `STATE_DIR/hop_data_{topic_slug}.json`, with the Write tool. Then:
+
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import apply_hop_decision
-from pathlib import Path
-state_dir = Path('STATE_DIR')
-# HOP_PLANNER_RESPONSE is the parsed JSON from this topic's hop-planner dispatch
-# HOP_DATA is the just-completed hop's record (hop number, pattern, queries, sources_kept, ended_at, ...)
-decision = HOP_PLANNER_RESPONSE['decision']  # one of: continue, stop, replan
-# early_terminated is a special form of stop set when Stage 4a's alternate-pattern
-# attempt also failed; the hop-planner doesn't emit it directly -- the orchestrator
-# substitutes it before calling apply_hop_decision.
-apply_hop_decision(
-    state_dir,
-    topic_name='TOPIC',
-    hop_data=HOP_DATA,
-    decision=decision,
-    confidence_score=HOP_PLANNER_RESPONSE['confidence_score'],
-    contradiction_rate=HOP_PLANNER_RESPONSE['contradiction_rate'],
-    next_hop=HOP_PLANNER_RESPONSE.get('next_hop'),       # used only when decision='continue'
-    replan_hint=HOP_PLANNER_RESPONSE.get('replan_hint'), # used only when decision='replan'
-)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" apply-hop-decision --topic "TOPIC" --response-file "STATE_DIR/hop_response_{topic_slug}.json" --hop-data-file "STATE_DIR/hop_data_{topic_slug}.json"
 ```
+
+It takes `decision`, `confidence_score`, `contradiction_rate`, `next_hop` (used only when decision is `continue`) and `replan_hint` (used only when decision is `replan`) from the response file. `early_terminated` is a special form of stop the hop-planner never emits: when Stage 4a's alternate-pattern attempt also failed, add `--decision early_terminated` to override the response's decision.
 
 What each decision atomically does (all three branches always persist confidence + contradiction_rate from the hop-planner response, in addition to the branch-specific writes):
 
@@ -594,13 +557,7 @@ Stage 4f no longer exists -- quality signals are now part of the atomic 4e trans
 When all topics have status != "active", transition to Stage 5:
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import update_stage
-from pathlib import Path
-update_stage(Path('STATE_DIR'), 'quality_gate')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" update-stage --stage quality_gate
 ```
 
 ---
@@ -613,28 +570,15 @@ After all topics have status != "active", compute the run-level quality signals 
 
 Each topic has its own depth and therefore its own `confidence_target` (via `get_depth_profile(topic.depth)["confidence_target"]`). Check per-topic, not run-aggregate:
 
-```python
-from confidence import get_depth_profile
-
-def topic_passes(t) -> bool:
-    target = get_depth_profile(t["depth"])["confidence_target"]
-    latest_conf = t["confidence_history"][-1] if t["confidence_history"] else 0.0
-    return latest_conf >= target and t["contradiction_rate"] <= 0.3
-
-failing_topics = [t for t in run["topics"] if not topic_passes(t)]
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" quality-gate
 ```
+
+It prints `{passed, failing_topics, topics, worst_confidence, replan_count}`. A topic passes when its latest confidence (0.0 if it has none) is at least its depth's `confidence_target` and its `contradiction_rate` is at most 0.3. `failing_topics` lists those that don't, each with `topic`, `depth`, `confidence`, `contradiction_rate` and `replan_hint`.
 
 If `failing_topics` is empty: proceed to Stage 6 (classify).
 
-For diagnostic display and the low-confidence note marker, also compute a "worst-case confidence" proxy across the run:
-
-```python
-worst_confidence = min(
-    (t["confidence_history"][-1] if t["confidence_history"] else 0.0
-     for t in run["topics"]),
-    default=0.0,
-)
-```
+For diagnostic display and the low-confidence note marker, `quality-gate` also returns `worst_confidence`: the lowest latest confidence across all topics (0.0 if none).
 
 This is the value used downstream as `OVERALL_CONFIDENCE` in Stage 5c's user-decision payload and 5d's `final_confidence_score`. There is no single "run target" because depths are per-topic, but the worst-topic confidence is the meaningful number to surface in user prompts and frontmatter callouts.
 
@@ -648,22 +592,14 @@ If `failing_topics` is non-empty AND `replan_count < 2`, run an auto-replan cycl
 2. **Re-admit each failing topic into the hop loop.** A topic that exhausted its initial budget has `current_hop == max_hops`, so Stage 4's admission filter (`current_hop < max_hops`) would otherwise skip it. The re-admission needs to set the hint, bump `max_hops` by 1, mark status `active`, increment `replan_count`, and roll the stage marker back to `hop_loop` -- **all in a single atomic state transition**. Use `apply_replan_readmit()`: a crash partway through must not leave the run with topics flagged active but stage stuck at `quality_gate`.
 3. Return to Stage 4 (the hop loop runs one more pass; only re-admitted topics dispatch search/fetch/summarize/hop-planner). Stage 4a's search-agent reads `topic.replan_hint` to bias the next query toward the suggested pattern/focus.
 
+Write the specs to `STATE_DIR/replan_specs.json` with the Write tool: one entry per failing topic, carrying either its existing `replan_hint` or a freshly synthesized one. `null` preserves an existing hint without overwriting it.
+
+```json
+[{"topic_name": "TOPIC", "replan_hint": {"issue": "thin sources", "suggested_pattern": "entity_expansion", "suggested_query_focus": "official agency data"}}]
+```
+
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import apply_replan_readmit
-from pathlib import Path
-state_dir = Path('STATE_DIR')
-# For each failing topic, pass either its existing replan_hint or a freshly
-# synthesized one. Pass None to preserve any existing hint without overwriting.
-specs = [
-    {'topic_name': t['topic'],
-     'replan_hint': SYNTHESIZED_HINT_OR_t['replan_hint']}
-    for t in FAILING_TOPICS
-]
-apply_replan_readmit(state_dir, specs)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" apply-replan-readmit --specs-file "STATE_DIR/replan_specs.json"
 ```
 
 `apply_replan_readmit` does the full transition (set replan_hint, bump max_hops, mark active, increment replan_count, set stage='hop_loop') in one load->mutate->save cycle. Do not call the per-field setters here -- they're not crash-safe across multiple writes.
@@ -705,33 +641,17 @@ Wait for the user's response.
 Record the decision:
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import record_user_decision
-from pathlib import Path
-record_user_decision(Path('STATE_DIR'), decision='DECISION_VALUE', confidence=OVERALL_CONFIDENCE)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" record-user-decision --decision DECISION_VALUE --confidence OVERALL_CONFIDENCE
 ```
 
 Branch by decision:
 
 - **`replan`** (only valid when `replan_count == 2`): apply the same re-admission recipe as Stage 5b via the atomic helper (`apply_replan_readmit`). For each failing topic, if its `replan_hint` is None, synthesize one (the user may also supply a manual hint via free-text input -- capture it as the `issue` field). Then dispatch the helper once with all specs:
 
+  Write `STATE_DIR/replan_specs.json` as in Stage 5b, then:
+
   ```bash
-  python -c "
-  import sys
-  sys.path.insert(0, 'SCRIPTS')
-  from state import apply_replan_readmit
-  from pathlib import Path
-  state_dir = Path('STATE_DIR')
-  specs = [
-      {'topic_name': t['topic'],
-       'replan_hint': SYNTHESIZED_HINT_OR_t['replan_hint']}
-      for t in FAILING_TOPICS
-  ]
-  apply_replan_readmit(state_dir, specs)
-  "
+  uv run --frozen --project "REPO" "REPO/scripts/rw.py" apply-replan-readmit --specs-file "STATE_DIR/replan_specs.json"
   ```
 
   This bumps `replan_count` to 3 in the same atomic save that re-admits the topics and rolls `stage` back to `hop_loop`. Return to Stage 4. After this attempt, no more replans -- if it fails again, re-enter Stage 5c with `replan_count == 3` and present only continue / abandon.
@@ -739,18 +659,7 @@ Branch by decision:
 - **`abandon`**: set `abandoned_at_gate: true` in the run dict, save, then call `abandon_run(STATE_DIR)` (which already exists in state.py and archives via `_archive_run`). Print the archived path so the user can inspect:
 
   ```bash
-  python -c "
-  import sys
-  sys.path.insert(0, 'SCRIPTS')
-  from state import load_run, save_state, abandon_run
-  from pathlib import Path
-  state_dir = Path('STATE_DIR')
-  run = load_run(state_dir)
-  if run is not None:
-      run['abandoned_at_gate'] = True
-      save_state(state_dir, run)
-  abandon_run(state_dir)
-  "
+  uv run --frozen --project "REPO" "REPO/scripts/rw.py" abandon-run --at-gate
   ```
 
   The archived files land under `STATE_DIR/history/{run_id}/` (the existing `_archive_run` destination). Print that path to the user.
@@ -760,16 +669,7 @@ Branch by decision:
 If decision was `continue`:
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import load_run, save_state
-from pathlib import Path
-run = load_run(Path('STATE_DIR'))
-run['low_confidence'] = True
-run['final_confidence_score'] = OVERALL_CONFIDENCE
-save_state(Path('STATE_DIR'), run)
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" set-low-confidence --confidence OVERALL_CONFIDENCE
 ```
 
 ---
@@ -779,13 +679,7 @@ save_state(Path('STATE_DIR'), run)
 Transition stage first:
 
 ```bash
-python -c "
-import sys
-sys.path.insert(0, 'SCRIPTS')
-from state import update_stage
-from pathlib import Path
-update_stage(Path('STATE_DIR'), 'classify')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" update-stage --stage classify
 ```
 
 ### 6a. Aggregate per-hop summaries
@@ -793,19 +687,10 @@ update_stage(Path('STATE_DIR'), 'classify')
 Before dispatching the classify agent, aggregate all per-hop summary files into a single `summaries.json`:
 
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from pathlib import Path
-state_dir = Path('STATE_DIR')
-all_summaries = []
-for hop_file in sorted(state_dir.glob('summaries_hop*.json')):
-    data = json.loads(hop_file.read_text())
-    all_summaries.extend(data.get('items', []))
-combined = {'topic': '{project_name}', 'items': all_summaries}
-(state_dir / 'summaries.json').write_text(json.dumps(combined, indent=2))
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" aggregate-summaries --project "PROJECT_NAME"
 ```
+
+It writes `STATE_DIR/summaries.json` as `{"topic": PROJECT_NAME, "items": [...]}`; read that file for 6b.
 
 ### 6b. Dispatch classify agent
 
@@ -820,12 +705,12 @@ Dispatch via the Task tool:
 {
   "summaries": {the aggregated summaries object from 6a},
   "vault_root": "VAULT",
-  "scripts_dir": "SCRIPTS",
+  "repo": "REPO",
   "shared_context_files": {from the research plan}
 }
 ```
 
-**Learned-pattern injection (v3.1.0):** same shape as Stage 4a's learned-pattern injection, but for the classify stage. If `LEARNED_BY_STAGE["classify"]` is non-empty, load each pattern's full record via `load_learned_patterns` (filter by the IDs in `LEARNED_BY_STAGE["classify"]`), append a `## Learned Patterns` block to the classify-agent's dispatch prompt under the existing JSON context, then call `record_applied_pattern(STATE_DIR, pattern_id)` once per surfaced pattern. See Stage 4a for the exact Bash snippets to reuse.
+**Learned-pattern injection (v3.1.0):** same shape as Stage 4a's learned-pattern injection, but for the classify stage. If `LEARNED_BY_STAGE["classify"]` is non-empty, load the full records with `rw.py learned-patterns --stage classify`, append a `## Learned Patterns` block to the classify-agent's dispatch prompt under the existing JSON context, then run `rw.py record-applied-pattern --pattern-id PATTERN_ID` once per surfaced pattern. See Stage 4a for the exact Bash commands.
 
 ### 6c. Parse classification
 
@@ -842,20 +727,13 @@ Complete the run and stop.
 
 Persist the parsed classify-agent response to `STATE_DIR/classification.json` so Stage 7's resume contract can find it, then advance the stage:
 
+Write the parsed classify-agent response to `STATE_DIR/classify_response.json` with the Write tool, then:
+
 ```bash
-python -c "
-import sys, json
-sys.path.insert(0, 'SCRIPTS')
-from state import update_stage, save_stage_output
-from pathlib import Path
-state_dir = Path('STATE_DIR')
-# CLASSIFICATION_JSON is the parsed JSON object from the classify-agent dispatch in 6b/6c.
-save_stage_output(state_dir, 'classification', CLASSIFICATION_JSON)
-update_stage(state_dir, 'write')
-"
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" save-stage-output --name classification --file "STATE_DIR/classify_response.json" --stage write
 ```
 
-Substitute `CLASSIFICATION_JSON` with the parsed dict from Stage 6c, serialized as a Python dict literal.
+This saves it atomically as `STATE_DIR/classification.json` and advances the stage to `write`.
 
 ---
 
