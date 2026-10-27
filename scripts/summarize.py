@@ -69,6 +69,7 @@ def _chunk_content(content: str, chunk_size: int = CHUNK_SIZE, overlap: int = CH
     return chunks
 
 
+from block_detect import MIN_USEFUL_CONTENT_CHARS
 from text_utils import slugify as _slugify
 
 
@@ -234,7 +235,8 @@ def summarize_batch(
     summaries: list[dict] = []
 
     for item in fetch_results.get("fetched", []):
-        if item.get("image_only_pdf"):
+        visual = bool(item.get("image_only_pdf") and item.get("pdf_path"))
+        if visual and len(item.get("content", "").strip()) < MIN_USEFUL_CONTENT_CHARS:
             summaries.append({
                 "url": item["url"],
                 "title": item["title"],
@@ -252,10 +254,12 @@ def summarize_batch(
             ollama_url=ollama_url,
         )
         if result is not None:
+            extra = {"image_only_pdf": True, "pdf_path": item["pdf_path"]} if visual else {}
             summaries.append({
                 "url": item["url"],
                 "title": item["title"],
                 **result,
+                **extra,
             })
 
     return summaries
@@ -288,9 +292,10 @@ def prepare_for_claude_code(
         filename = f"{index}-{slug}.md"
 
         truncated_content = item["content"][:MAX_CONTENT_CHARS_CLAUDE]
+        is_visual = bool(item.get("image_only_pdf") and item.get("pdf_path"))
         visual = (
-            f"Image-only PDF: read the page images at {item.get('pdf_path')}\n\n"
-            if item.get("image_only_pdf") else ""
+            f"Image-only PDF: read the page images at {item['pdf_path']}\n\n"
+            if is_visual else ""
         )
 
         file_content = (
@@ -304,9 +309,9 @@ def prepare_for_claude_code(
         (output_dir / filename).write_text(file_content, encoding="utf-8")
 
         entry = {"url": item["url"], "title": item["title"], "file": filename}
-        if item.get("image_only_pdf"):
+        if is_visual:
             entry["image_only_pdf"] = True
-            entry["pdf_path"] = item.get("pdf_path")
+            entry["pdf_path"] = item["pdf_path"]
         entries.append(entry)
 
     return entries
@@ -349,15 +354,15 @@ def main() -> None:
         # SKILL.md Stage 6a (which globs `summaries_hop*.json` and reads
         # `data.get("items", [])`).
         total = len(fetch_results.get("fetched", []))
-        usable = [s for s in summaries if s.get("usable", True)]
+        skipped = [s for s in summaries if s.get("usable") is False]
         result = {
             "mode": "ollama",
             "model": args.model,
             "items": summaries,
             "stats": {
                 "total": total,
-                "summarized": len(usable),
-                "needs_visual_read": len(summaries) - len(usable),
+                "summarized": len(summaries) - len(skipped),
+                "needs_visual_read": len(skipped),
                 "failed": total - len(summaries),
             },
         }

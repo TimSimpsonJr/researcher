@@ -277,7 +277,47 @@ def test_cli_stats_count_visual_reads(tmp_path):
         finally:
             sys.argv = argv_backup
     result = json.loads(out.read_text(encoding="utf-8"))
+    assert mock_req.post.call_count == 1  # only the non-skipped item reaches Ollama
     assert result["stats"] == {"total": 2, "summarized": 1, "needs_visual_read": 1, "failed": 0}
+
+
+OLLAMA_OK = {"response": json.dumps({
+    "summary": "S", "source_type": "government", "key_entities": [], "key_claims": []})}
+
+
+def test_image_only_pdf_with_text_is_summarized_and_keeps_pdf_fields():
+    from summarize import summarize_batch
+    item = {**IMAGE_PDF, "content": "Partial OCR text. " * 40}
+    resp = MagicMock()
+    resp.json.return_value = OLLAMA_OK
+    with patch("summarize.requests.post", return_value=resp) as post:
+        summaries = summarize_batch({"fetched": [item]}, model="m")
+    assert post.call_count == 1
+    assert summaries[0]["summary"] == "S"
+    assert summaries[0]["image_only_pdf"] is True
+    assert summaries[0]["pdf_path"] == "C:/cache/pdf/ab.pdf"
+    assert summaries[0].get("usable", True) is True
+
+
+def test_image_only_flag_without_pdf_path_is_not_a_visual_read(tmp_path):
+    from summarize import prepare_for_claude_code, summarize_batch
+    item = {**IMAGE_PDF, "pdf_path": None, "content": ""}
+    resp = MagicMock()
+    resp.json.return_value = OLLAMA_OK
+    with patch("summarize.requests.post", return_value=resp) as post:
+        summaries = summarize_batch({"fetched": [item]}, model="m")
+    assert post.call_count == 1 and summaries[0].get("usable", True) is True
+    entry = prepare_for_claude_code({"fetched": [item]}, tmp_path)[0]
+    assert "image_only_pdf" not in entry
+    assert "Image-only PDF" not in (tmp_path / entry["file"]).read_text(encoding="utf-8")
+
+
+def test_prepare_writes_windows_pdf_path_verbatim(tmp_path):
+    from summarize import prepare_for_claude_code
+    p = r"C:\Users\tim\Tim's Vault\cache\pdf\ab.pdf"
+    entry = prepare_for_claude_code({"fetched": [{**IMAGE_PDF, "pdf_path": p}]}, tmp_path)[0]
+    assert f"read the page images at {p}\n" in (tmp_path / entry["file"]).read_text(encoding="utf-8")
+    assert entry["pdf_path"] == p
 
 
 def test_prepare_for_claude_marks_image_only_pdf(tmp_path):
