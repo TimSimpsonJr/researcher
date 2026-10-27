@@ -31,7 +31,7 @@ class FakeSession:
     def __init__(self, result=None, available=True, log=None, by_url=None):
         self.result, self.available, self.by_url = result, available, by_url or {}
         self.log = log if log is not None else []
-        self.calls, self.entered = [], 0
+        self.calls, self.entered, self.exited = [], 0, 0
 
     def fetch(self, url, cache_dir):
         self.calls.append(url)
@@ -46,6 +46,7 @@ class FakeSession:
         return self
 
     def __exit__(self, *exc):
+        self.exited += 1
         return False
 
 
@@ -365,7 +366,7 @@ def test_process_urls_routes_failures(monkeypatch, tmp_path):
     assert [f["url"] for f in failed] == [gone]
     assert failed[0]["error"].startswith("All fetch methods failed")
     assert [a["method"] for a in failed[0]["attempts"]] == ["jina", "wayback", "playwright"]
-    assert session.entered == 1
+    assert session.entered == 1 and session.exited == 1
 
 
 def test_no_browser_when_nothing_failed(monkeypatch, tmp_path):
@@ -447,8 +448,60 @@ def test_serial_first_pass_spaces_requests(monkeypatch, tmp_path):
     _first(monkeypatch, {u: ok() for u in urls})
     sleeps = []
     monkeypatch.setattr(fetch_and_clean.time, "sleep", sleeps.append)
+    monkeypatch.setattr(fetch_and_clean.time, "monotonic", lambda: 100.0)
     fetch_and_clean.process_urls([{"url": u} for u in urls], tmp_path, 7, None, fetch_delay=0.5)
     assert sleeps == [0.5, 0.5]
+
+
+def test_serial_first_pass_sleeps_only_the_remainder(monkeypatch, tmp_path):
+    urls = [f"https://a.example/{i}" for i in range(2)]
+    clock = [100.0]
+    sleeps = []
+
+    def fake(url, key, cache_dir):
+        clock[0] += 0.3  # the fetch itself took 0.3s
+        return ok(), [att("jina", "ok")]
+
+    monkeypatch.setattr(fetch_and_clean, "first_pass", fake)
+    monkeypatch.setattr(fetch_and_clean.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(fetch_and_clean.time, "sleep", sleeps.append)
+    fetch_and_clean.process_urls([{"url": u} for u in urls], tmp_path, 7, None, fetch_delay=0.5)
+    assert sleeps == [pytest.approx(0.2)]
+
+
+def test_cache_write_failure_still_returns_record(monkeypatch, tmp_path, capsys):
+    url = "https://a.example/x"
+    _first(monkeypatch, {url: ok()})
+
+    def deny(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(fetch_and_clean, "save_cache", deny)
+    fetched, failed, _ = fetch_and_clean.process_urls([{"url": url}], tmp_path, 7, None)
+    assert [f["url"] for f in fetched] == [url] and failed == []
+    assert "cache write failed" in capsys.readouterr().err
+
+
+def test_jina_429_is_throttling_not_a_wall(monkeypatch, tmp_path):
+    url = "https://a.example/x"
+    monkeypatch.setattr(fetch_and_clean.requests, "get", lambda *a, **k: _resp(429, "Too Many Requests"))
+    r = fetch_and_clean.fetch_via_jina(url)
+    assert r.verdict == blocked("error:jina_429")
+    monkeypatch.setattr(fetch_and_clean, "BrowserSession", lambda: FakeSession(available=False))
+    monkeypatch.setattr(fetch_and_clean.wayback, "fetch",
+                        lambda u, c: bad("missing", "no_snapshot", "wayback"))
+    _, failed, needs_browser = fetch_and_clean.process_urls([{"url": url}], tmp_path, 7, None)
+    assert needs_browser == [] and [f["url"] for f in failed] == [url]
+
+
+def test_pdf_jina_ok_with_unsafe_direct_keeps_jina_text(chain, tmp_path):
+    # Current behaviour, pinned: the unsafe direct hop is recorded but does not
+    # discard Jina's text, which came from Jina's own fetch, not ours.
+    calls, results = chain
+    results["jina"] = ok()
+    results["direct"] = bad("unsafe", "ssrf", "direct")
+    result, attempts = fetch_and_clean.fetch_url("https://a.example/packet.pdf", cache_dir=tmp_path)
+    assert result.method == "jina" and attempts[-1] == att("direct", "unsafe", "ssrf")
 
 
 def test_main_writes_needs_browser_and_stats(monkeypatch, tmp_path):

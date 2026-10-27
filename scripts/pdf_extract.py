@@ -12,6 +12,7 @@ flagged image-only too.
 
 import functools
 import hashlib
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -20,6 +21,7 @@ import pymupdf
 
 from block_detect import MIN_USEFUL_CONTENT_CHARS, OK, FetchResult, Verdict, blocked
 
+_PDF_LOCK = threading.Lock()  # ponytail: PyMuPDF is not thread-safe; one extract at a time
 EMPTY_PAGE_CHARS = 20  # fewer stripped chars than this = no usable text layer
 OCR_DPI = 300
 # ponytail: OCR capped at 50 pages per document, pages past the cap go to the visual read;
@@ -98,7 +100,8 @@ def to_result(pdf_bytes: bytes, cache_dir: Path) -> FetchResult:
             verdict=blocked("not_pdf"), method="pdf-local", content_type="application/pdf"
         )
     try:
-        text, info = extract(pdf_bytes, cache_dir)
+        with _PDF_LOCK:
+            text, info = extract(pdf_bytes, cache_dir)
     except (pymupdf.FileDataError, pymupdf.EmptyFileError, ValueError, RuntimeError) as e:
         return FetchResult(
             verdict=blocked(f"error:{type(e).__name__}"),

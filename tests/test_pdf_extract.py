@@ -127,3 +127,28 @@ def test_to_result_verdicts(tmp_path, no_ocr):
     assert thin.verdict.kind == "thin" and thin.content == ""
     scanned = pdf_extract.to_result(_image_only_pdf(2), tmp_path)
     assert scanned.verdict.ok and scanned.image_only_pdf and scanned.pdf_path
+
+
+def test_to_result_serializes_extraction(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    state = {"now": 0, "peak": 0}
+    guard = threading.Lock()
+
+    def slow_extract(pdf_bytes, cache_dir):
+        with guard:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        time.sleep(0.05)
+        with guard:
+            state["now"] -= 1
+        return "text " * 100, pdf_extract.PdfInfo(method="pdf-local", pages=1, empty_pages=0)
+
+    monkeypatch.setattr(pdf_extract, "extract", slow_extract)
+    threads = [threading.Thread(target=pdf_extract.to_result, args=(b"%PDF-1.7", tmp_path)) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert state["peak"] == 1

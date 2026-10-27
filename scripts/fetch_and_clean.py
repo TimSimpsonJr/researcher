@@ -35,7 +35,7 @@ import wayback
 from block_detect import FetchResult, Verdict, blocked, classify
 from fetch_playwright import BrowserSession
 from pdf_extract import looks_like_pdf, to_result
-from url_safety import UnsafeURLError, validate_url  # noqa: F401 (validate_url re-exported)
+from url_safety import UnsafeURLError, validate_url  # tests patch fetch_and_clean.validate_url
 
 # ──────────────────────────────────────────────
 # Constants
@@ -48,7 +48,7 @@ MAX_CONTENT_CHARS = 50_000
 JINA_BASE_URL = "https://r.jina.ai"
 MAX_REDIRECTS = 5
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
-LIVE_METHODS =frozenset({"jina", "direct", "playwright"})  # hit the site itself
+LIVE_METHODS = frozenset({"jina", "direct", "playwright"})  # hit the site itself
 
 
 # ──────────────────────────────────────────────
@@ -153,6 +153,8 @@ def fetch_via_jina(url: str, api_key: str | None = None) -> FetchResult:
         headers["Authorization"] = f"Bearer {api_key}"
     response = requests.get(f"{JINA_BASE_URL}/{url}", headers=headers, timeout=30)
     ctype = response.headers.get("Content-Type", "")
+    if response.status_code == 429:  # Jina's own throttling, not a site wall
+        return FetchResult(blocked("error:jina_429"), method="jina", content_type=ctype)
     content = response.text
     verdict = classify(response.status_code, ctype, content)
     title = next((line[2:].strip() for line in content.splitlines() if line.startswith("# ")), "")
@@ -310,7 +312,10 @@ def _store(cache_dir: Path, url: str, result: FetchResult) -> dict:
     if result.is_pdf:
         entry["image_only_pdf"] = result.image_only_pdf
         entry["pdf_path"] = result.pdf_path
-    save_cache(cache_dir, url_cache_key(url), entry)
+    try:
+        save_cache(cache_dir, url_cache_key(url), entry)
+    except OSError as exc:
+        print(f"[fetch_and_clean] WARNING: cache write failed for {url}: {exc}", file=sys.stderr)
     return _record(entry, cache_hit=False)
 
 
@@ -334,9 +339,11 @@ def _run_first_pass(urls: list[str], jina_api_key: str | None, cache_dir: Path,
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(lambda u: first_pass(u, jina_api_key, cache_dir), urls))
     results = []
-    for i, url in enumerate(urls):
-        if i and fetch_delay > 0:
-            time.sleep(fetch_delay)
+    last = None
+    for url in urls:
+        if last is not None and fetch_delay > 0:
+            time.sleep(max(0.0, fetch_delay - (time.monotonic() - last)))
+        last = time.monotonic()  # spacing is start to start
         results.append(first_pass(url, jina_api_key, cache_dir))
     return results
 
