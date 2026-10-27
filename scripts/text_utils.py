@@ -36,7 +36,7 @@ class _TextExtractor(HTMLParser):
         self._in_title = False
 
     def handle_starttag(self, tag, attrs):
-        if tag == "title":
+        if tag == "title" and not self.title_parts:
             self._in_title = True
         elif tag == "body":
             self._skip = 0  # recover from an unclosed <head>

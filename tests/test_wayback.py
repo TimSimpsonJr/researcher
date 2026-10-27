@@ -17,11 +17,20 @@ class Resp:
     def __init__(self, status=200, json_data=None, text="", content=b"", headers=None):
         self.status_code = status
         self._json = json_data
-        self.text = text
+        self._text = text
         self.content = content
         self.headers = headers or {}
+        self.encoding = None
+
+    @property
+    def text(self):
+        if self.content:
+            return self.content.decode(self.encoding or "iso-8859-1")
+        return self._text
 
     def json(self):
+        if self._json is None:
+            raise ValueError("not json")
         return self._json
 
 
@@ -105,6 +114,42 @@ def test_limiter_spaces_requests(clock, net):
     wayback._get("https://web.archive.org/a")
     wayback._get("https://web.archive.org/b")
     assert clock["sleeps"] == [1.5]
+
+
+def test_defer_makes_the_next_request_wait(clock, net):
+    queue, _, _ = net
+    queue.append(Resp(200))
+    wayback.LIMITER.defer(7)
+    wayback._get("https://web.archive.org/a")
+    assert clock["sleeps"] == [7.0]
+
+
+def test_charset_less_html_decodes_as_utf8(clock, net, tmp_path):
+    queue, _, _ = net
+    body = ("<html><body><p>Don’t " + "renew the contract. " * 15 + "</p></body></html>").encode()
+    queue += [cdx_ok(), Resp(200, content=body, headers={"Content-Type": "text/html"})]
+    result = wayback.fetch("https://x.gov/agenda", tmp_path)
+    assert result.verdict.ok and "Don’t renew" in result.content
+
+
+def test_non_json_cdx_reply_is_no_snapshot(clock, net, tmp_path):
+    queue, _, _ = net
+    queue.append(Resp(200, text="<html>maintenance</html>"))
+    assert wayback.fetch("https://x.gov/a", tmp_path).verdict == Verdict("missing", "no_snapshot")
+
+
+def test_404_at_snapshot_url_is_missing(clock, net, tmp_path):
+    queue, _, _ = net
+    queue += [cdx_ok(), Resp(404)]
+    assert wayback.fetch("https://x.gov/a", tmp_path).verdict == Verdict("missing", "http_404")
+
+
+def test_walled_snapshot_is_blocked_with_no_content(clock, net, tmp_path):
+    queue, _, _ = net
+    queue += [cdx_ok(), Resp(200, text="<html><body><h1>Just a moment...</h1></body></html>",
+                             headers={"Content-Type": "text/html"})]
+    result = wayback.fetch("https://x.gov/a", tmp_path)
+    assert result.verdict == Verdict("blocked", "cloudflare") and result.content == ""
 
 
 def test_pdf_snapshot_goes_to_pdf_extract(clock, net, tmp_path, monkeypatch):

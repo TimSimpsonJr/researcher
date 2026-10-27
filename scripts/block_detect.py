@@ -16,7 +16,9 @@ PDF_METHODS = ("pdf-local", "pdf-ocr")
 
 # (reason, lowercase needle, in_markup), checked in order; the first hit wins.
 # in_markup=True needles are also searched in the raw html; phrase needles
-# (False) match visible text only, so a login link in a nav bar doesn't count.
+# (False) match visible text only. Login phrases must name a gated action
+# ("sign in to continue", "log in to view"), so "sign in to comment" prompts on
+# real pages don't count; with html_to_text, link text is visible text too.
 # Cloudflare's passive interstitial comes first so the browser waits on it rather
 # than giving up. A new wall is one line here plus a fixture in tests/fixtures/pages/.
 # "challenge-platform" is deliberately absent: Cloudflare's jsd bot-detection
@@ -40,9 +42,10 @@ MARKERS = [
     ("denied", "you don't have permission to access", False),
     ("login", "sign in to continue", False),
     ("login", "log in to continue", False),
-    ("login", "please sign in", False),
-    ("login", "please log in", False),
-    ("login", "you must be logged in", False),
+    ("login", "please sign in to view", False),
+    ("login", "please log in to view", False),
+    ("login", "you must be logged in to view", False),
+    ("login", "you must be logged in to access", False),
     ("login", "login required", False),
 ]
 

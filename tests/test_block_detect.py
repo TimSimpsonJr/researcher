@@ -13,6 +13,7 @@ from block_detect import (
     blocked,
     classify,
 )
+from text_utils import html_to_text
 
 PAGES = Path(__file__).parent / "fixtures" / "pages"
 ARTICLE = "The county commission reviewed the license plate reader contract. " * 100
@@ -46,9 +47,17 @@ def test_cloudflare_jsd_script_on_real_page_is_ok():
     assert classify(200, "text/html", visible, html) == Verdict("ok")
 
 
-def test_phrase_markers_do_not_match_markup():
-    html = '<main><a href="/login">Please log in</a></main>'
-    text = "The county commission reviewed the license plate reader contract. " * 5
+@pytest.mark.parametrize("prompt", [
+    "Please sign in to comment.",
+    "Please log in to reply.",
+    "You must be logged in to post a comment.",
+])
+def test_comment_login_prompt_on_short_real_page_is_ok(prompt):
+    body = "The county commission reviewed the license plate reader contract. " * 5
+    html = (f'<nav><a href="/login">Sign in</a></nav><main><p>{body}</p></main>'
+            f'<section id="respond"><p>{prompt}</p></section>')
+    text, _ = html_to_text(html)
+    assert prompt in text and len(text) < WALL_MAX_CHARS
     assert classify(200, "text/html", text, html) == Verdict("ok")
 
 

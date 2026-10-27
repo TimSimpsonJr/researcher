@@ -52,6 +52,11 @@ class _Limiter:
             finally:
                 self.last = _now()
 
+    def defer(self, seconds: float):
+        """Hold every thread's next request for at least `seconds` from now."""
+        with self.lock:
+            self.last = max(self.last or 0.0, _now() + seconds - self.min_gap)
+
 
 LIMITER = _Limiter(MIN_GAP_S)
 
@@ -71,10 +76,10 @@ def _get(url: str, **kwargs):
     """GET through the limiter; retries 429/503. Returns the last response."""
     for attempt in range(MAX_TRIES):
         with LIMITER.slot():
-            response = requests.get(url, timeout=60, **kwargs)
+            response = requests.get(url, timeout=(10, 60), **kwargs)
         if response.status_code not in RETRY_STATUSES or attempt == MAX_TRIES - 1:
             return response
-        _sleep(_retry_delay(response, attempt))
+        LIMITER.defer(_retry_delay(response, attempt))
 
 
 def fetch(url: str, cache_dir: Path) -> FetchResult:
@@ -86,7 +91,10 @@ def fetch(url: str, cache_dir: Path) -> FetchResult:
     })
     if cdx.status_code != 200:
         return FetchResult(classify(cdx.status_code, "", ""), method="wayback")
-    rows = cdx.json() if cdx.text.strip() else []
+    try:
+        rows = cdx.json()
+    except ValueError:  # empty or non-JSON reply (e.g. a maintenance page)
+        rows = []
     if len(rows) < 2:  # first row is the header
         return FetchResult(Verdict("missing", "no_snapshot"), method="wayback")
     archived = raw_url(rows[-1][0], url)
@@ -97,6 +105,8 @@ def fetch(url: str, cache_dir: Path) -> FetchResult:
         return FetchResult(classify(response.status_code, ctype, ""), method="wayback", content_type=ctype)
     if looks_like_pdf(url, ctype, response.content[:5]):
         return to_result(response.content, cache_dir)
+    if "charset" not in ctype.lower():
+        response.encoding = "utf-8"  # ponytail: meta-charset non-UTF-8 pages still misdecode; use apparent_encoding if seen
     text, title = html_to_text(response.text)
     verdict = classify(200, ctype, text)
     return FetchResult(verdict, text if verdict.ok else "", title, "wayback", ctype)

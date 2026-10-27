@@ -14,6 +14,11 @@ def test_html_to_text_drops_scripts_keeps_title_and_blocks():
     assert text == "Item 4\nCamera contract & renewal.\nSecond block"
 
 
+def test_html_to_text_ignores_svg_title():
+    html = "<head><title>Agenda</title></head><body><svg><title>Search</title></svg><p>x</p></body>"
+    assert html_to_text(html) == ("x", "Agenda")
+
+
 def test_html_to_text_recovers_from_unclosed_head():
     text, title = html_to_text("<html><head><title>T</title><body><p>Body text</p></body>")
     assert title == "T" and text == "Body text"
