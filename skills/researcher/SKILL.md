@@ -520,7 +520,7 @@ uv run --frozen --project "REPO" "REPO/scripts/rw.py" add-seen-urls --topic "TOP
 
 The helper dedupes — calling it again with overlapping URLs (e.g., the same URL appears in multiple hops) is safe.
 
-**If `fetched` is still empty after the browser pass** (every URL ended in `failed`, or in `needs_browser` and was not recovered): treat the hop as a failure for the affected topic(s). The hop-planner in 4e will see zero new sources and decide accordingly. If ALL topics had zero successful fetches, abandon the run and stop (no fetched content means downstream stages have nothing to work with).
+**If `fetched` is still empty after the browser pass** (every URL ended in `failed`, or in `needs_browser` and was not recovered): treat the hop as a failure for the affected topic(s). The hop-planner in 4e will see zero new sources and decide accordingly. If ALL topics had zero successful fetches, abandon the run, print `manual_urls` from the run state (same format as Stage 10b), and stop (no fetched content means downstream stages have nothing to work with).
 
 ### 4c. Media
 
@@ -1381,7 +1381,7 @@ The workflow's agents draw from the turn's **shared budget pool**, so a `+Nk`/bu
 
 ### 4B.3 Thread-selection gate
 
-The result is `{written_notes, updated_notes, threads, manual_urls, summary}` (`manual_urls`: `{topic, url, reason}` pages the runners could not read, deduped by URL). If `summary.aborted` / `aborted:true`, report `reason` and stop. Otherwise:
+The result is `{written_notes, updated_notes, threads, manual_urls, summary}` (`manual_urls`: `{topic, url, reason}` pages the runners could not read, deduped by URL). If `summary.aborted` / `aborted:true`, report `reason`, print the "Needs a manual read" list from `manual_urls` (format below), and stop. Otherwise:
 ```
 Batch complete: {notes_written} written, {notes_updated} updated{, {N} low-confidence flagged}.
 {if manual_urls:}

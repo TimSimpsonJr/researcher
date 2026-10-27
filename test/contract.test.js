@@ -111,6 +111,13 @@ test('manual_urls: runner schema accepts them and the workflow surfaces them', a
   assert.match(src, /manual_urls:\s*research\.manual_urls/, 'run() result must carry manual_urls');
 });
 
+test('manual_urls: the no-sources abort carries them through run()', () => {
+  const src = norm(readFileSync(WF, 'utf8'));
+  assert.match(src, /aborted: true, reason: 'no_sources', manual_urls: collectManualUrls\(topics\)/);
+  const m = src.match(/if \(research\.aborted\) \{[\s\S]*?\n  \}/);
+  assert.ok(m && /manual_urls: research\.manual_urls \?\? \[\]/.test(m[0]), 'aborted result must include manual_urls');
+});
+
 test('workflow file is LF-only (Workflow scriptPath rejects CRLF)', () => {
   assert.ok(!readFileSync(WF, 'utf8').includes('\r'));
 });

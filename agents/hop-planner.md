@@ -42,7 +42,7 @@ You will receive:
 
 ## Step 1: Compute Confidence
 
-In batch mode skip this step: the workflow computes confidence itself and `sources_so_far` is an array, not a file. Otherwise call the confidence formula on `sources_so_far`. The orchestrator substitutes the `{repo}`, `{sources_so_far}`, and `{depth}` placeholders before dispatching the prompt — treat them as filled in by the time you run this:
+In batch mode skip this step: the workflow computes confidence itself and `sources_so_far` is an array, not a file. Otherwise call the confidence formula on `sources_so_far`. The orchestrator substitutes the `{repo}`, `{sources_so_far}`, `{depth}`, and `{topic}` placeholders before dispatching the prompt — treat them as filled in by the time you run this:
 
 ```bash
 uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" compute-confidence --sources-file "{sources_so_far}" --depth {depth} --topic "{topic}"

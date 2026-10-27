@@ -674,7 +674,7 @@ async function runResearch(topics, config) {
 
       if (allZero) {
         log?.('research-batch: every active topic fetched zero sources this hop — aborting.');
-        return { aborted: true, reason: 'no_sources', topics };
+        return { aborted: true, reason: 'no_sources', manual_urls: collectManualUrls(topics), topics };
       }
     }
 
@@ -750,6 +750,7 @@ async function run(args) {
       written_notes: [],
       updated_notes: [],
       threads: [],
+      manual_urls: research.manual_urls ?? [],
       summary: { project: plan.project ?? null, topics: topics.length, reason: research.reason },
     };
   }

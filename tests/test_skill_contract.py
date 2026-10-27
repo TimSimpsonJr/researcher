@@ -216,6 +216,7 @@ def test_stage_4b_browser_pass_routes_needs_browser():
         "pdf.worker.min.mjs", "If `fetched` is still empty after the browser pass",
         "pdf_unreadable", "max_chars", ".slice(0, 50000)", "exact host",
         "`{index}` = the entry's position in `needs_browser`",
+        "print `manual_urls` from the run state (same format as Stage 10b), and stop",
     ):
         assert needle in s, needle
 
