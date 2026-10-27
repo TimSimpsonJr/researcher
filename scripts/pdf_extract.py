@@ -22,7 +22,8 @@ from block_detect import MIN_USEFUL_CONTENT_CHARS, OK, FetchResult, Verdict, blo
 
 EMPTY_PAGE_CHARS = 20  # fewer stripped chars than this = no usable text layer
 OCR_DPI = 300
-# ponytail: OCR capped at 50 pages per document; raise or make configurable if long scans matter
+# ponytail: OCR capped at 50 pages per document, pages past the cap go to the visual read;
+# raise or make configurable if long scans matter
 MAX_OCR_PAGES = 50
 
 
@@ -69,9 +70,10 @@ def extract(pdf_bytes: bytes, cache_dir: Path) -> tuple[str, PdfInfo]:
             raise ValueError("encrypted")
         texts = [page.get_text() for page in doc]
         empty = [i for i, t in enumerate(texts) if _is_empty(t)]
-        method, ocr_failed = "pdf-local", False
+        method, ocr_failed, capped = "pdf-local", False, False
         if empty and tesseract_available():
             method = "pdf-ocr"
+            capped = len(empty) > MAX_OCR_PAGES
             for i in empty[:MAX_OCR_PAGES]:
                 try:
                     texts[i] = _ocr_page(doc[i])
@@ -80,7 +82,7 @@ def extract(pdf_bytes: bytes, cache_dir: Path) -> tuple[str, PdfInfo]:
         title = (doc.metadata or {}).get("title") or ""
     still_empty = sum(1 for t in texts if _is_empty(t))
     info = PdfInfo(method=method, pages=len(texts), empty_pages=still_empty, title=title)
-    if ocr_failed or (texts and still_empty * 2 > len(texts)):
+    if ocr_failed or capped or (texts and still_empty * 2 > len(texts)):
         path = Path(cache_dir) / "pdf" / f"{hashlib.sha256(pdf_bytes).hexdigest()}.pdf"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(pdf_bytes)

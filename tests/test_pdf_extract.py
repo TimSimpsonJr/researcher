@@ -62,7 +62,7 @@ def test_ocr_is_capped_at_max_pages(tmp_path, monkeypatch):
     monkeypatch.setattr(pdf_extract, "_ocr_page", lambda page: calls.append(1) or "Recognised text from a scanned page.")
     text, info = pdf_extract.extract(_blank_pdf(pdf_extract.MAX_OCR_PAGES + 10), tmp_path)
     assert len(calls) == pdf_extract.MAX_OCR_PAGES
-    assert info.empty_pages == 10 and info.image_only_pdf is False
+    assert info.empty_pages == 10 and info.image_only_pdf is True and info.pdf_path
 
 
 @pytest.fixture
