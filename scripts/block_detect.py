@@ -1,6 +1,6 @@
 """block_detect.py — Is a fetched page real content, a bot wall, gone, or empty?
 
-classify() turns (HTTP status, content type, text) into a Verdict. Every fetcher
+classify() turns (HTTP status, content type, text, optional raw html) into a Verdict. Every fetcher
 (Jina, the direct PDF GET, the local browser, Wayback) returns a FetchResult
 carrying one, so the fallback chain in fetch_and_clean routes on the verdict
 instead of on exceptions or on length alone.
@@ -9,38 +9,41 @@ instead of on exceptions or on length alone.
 from dataclasses import dataclass
 
 MIN_USEFUL_CONTENT_CHARS = 200  # below this, content is likely empty/blocked
-WALL_MAX_CHARS = 5000  # wall pages are short; markers in longer text are ignored
+WALL_MAX_CHARS = 5000  # visible text length; wall pages are short, markers on longer pages are ignored
 BLOCKED_STATUSES = frozenset({401, 403, 429, 503})
 MISSING_STATUSES = frozenset({404, 410})
 PDF_METHODS = ("pdf-local", "pdf-ocr")
 
-# (reason, lowercase needle), checked in order; the first hit wins. Cloudflare's
-# passive interstitial comes first so the browser waits on it rather than giving
-# up. A new wall is one line here plus a fixture in tests/fixtures/pages/.
+# (reason, lowercase needle, in_markup), checked in order; the first hit wins.
+# in_markup=True needles are also searched in the raw html; phrase needles
+# (False) match visible text only, so a login link in a nav bar doesn't count.
+# Cloudflare's passive interstitial comes first so the browser waits on it rather
+# than giving up. A new wall is one line here plus a fixture in tests/fixtures/pages/.
+# "challenge-platform" is deliberately absent: Cloudflare's jsd bot-detection
+# loader (/cdn-cgi/challenge-platform/scripts/jsd/main.js) sits on ordinary pages.
 MARKERS = [
-    ("cloudflare", "just a moment..."),
-    ("cloudflare", "attention required! | cloudflare"),
-    ("cloudflare", "verify you are human"),
-    ("cloudflare", "needs to review the security of your connection"),
-    ("cloudflare", "checking your browser before accessing"),
-    ("cloudflare", "cf-chl"),
-    ("cloudflare", "_cf_chl_opt"),
-    ("cloudflare", "challenge-platform"),
-    ("captcha", "cf-turnstile"),
-    ("captcha", "h-captcha"),
-    ("captcha", "hcaptcha.com"),
-    ("captcha", "g-recaptcha"),
-    ("captcha", "www.google.com/recaptcha"),
-    ("captcha", "i'm not a robot"),
-    ("denied", "access denied"),
-    ("denied", "request blocked"),
-    ("denied", "you don't have permission to access"),
-    ("login", "sign in to continue"),
-    ("login", "log in to continue"),
-    ("login", "please sign in"),
-    ("login", "please log in"),
-    ("login", "you must be logged in"),
-    ("login", "login required"),
+    ("cloudflare", "just a moment...", False),
+    ("cloudflare", "attention required! | cloudflare", False),
+    ("cloudflare", "verify you are human", False),
+    ("cloudflare", "needs to review the security of your connection", False),
+    ("cloudflare", "checking your browser before accessing", False),
+    ("cloudflare", "cf-chl", True),
+    ("cloudflare", "_cf_chl_opt", True),
+    ("captcha", "cf-turnstile", True),
+    ("captcha", "h-captcha", True),
+    ("captcha", "hcaptcha.com", True),
+    ("captcha", "g-recaptcha", True),
+    ("captcha", "www.google.com/recaptcha", True),
+    ("captcha", "i'm not a robot", False),
+    ("denied", "access denied", False),
+    ("denied", "request blocked", False),
+    ("denied", "you don't have permission to access", False),
+    ("login", "sign in to continue", False),
+    ("login", "log in to continue", False),
+    ("login", "please sign in", False),
+    ("login", "please log in", False),
+    ("login", "you must be logged in", False),
+    ("login", "login required", False),
 ]
 
 
@@ -82,17 +85,18 @@ class FetchResult:
 def classify(status: int | None, content_type: str, text: str, html: str = "") -> Verdict:
     """Verdict for one response.
 
-    text is the readable text; html (optional) is the raw markup, scanned for
-    widget markers alongside text. Markers only count when the visible text is
-    short, so a long article with a reCAPTCHA comment form stays ok. Marker hits
-    beat status codes, so a Cloudflare 403 reports "cloudflare", not "http_403".
+    text is the readable text; html (optional) is the raw markup, scanned only
+    for the in_markup needles (script/widget names); phrase needles match text
+    alone. Markers only count when the visible text is short, so a long article
+    with a reCAPTCHA comment form stays ok. Marker hits beat status codes, so a
+    Cloudflare 403 reports "cloudflare", not "http_403".
     """
     if status in MISSING_STATUSES:
         return Verdict("missing", f"http_{status}")
     if "pdf" not in (content_type or "").lower() and len(text) < WALL_MAX_CHARS:
-        hay = f"{text}\n{html}".lower()
-        for reason, needle in MARKERS:
-            if needle in hay:
+        low_text, low_html = text.lower(), html.lower()
+        for reason, needle, in_markup in MARKERS:
+            if needle in low_text or (in_markup and needle in low_html):
                 return blocked(reason)
     if status in BLOCKED_STATUSES:
         return blocked(f"http_{status}")

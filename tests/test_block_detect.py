@@ -1,5 +1,6 @@
 """Tests for block_detect.py: content vs bot wall vs gone vs empty."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,24 @@ def _page(name: str) -> str:
     ("short_real.md", 200, Verdict("ok")),
 ])
 def test_fixture_pages(name, status, expected):
-    assert classify(status, "text/html", _page(name)) == expected
+    page = _page(name)
+    if name.endswith(".html"):
+        assert classify(status, "text/html", "", page) == expected
+    else:
+        assert classify(status, "text/html", page) == expected
+
+
+def test_cloudflare_jsd_script_on_real_page_is_ok():
+    html = _page("cloudflare_jsd_real.html")
+    visible = re.sub(r"<[^>]+>", " ", re.sub(r"(?s)<script.*?</script>", "", html))
+    assert "challenge-platform" in html and 200 < len(visible) < WALL_MAX_CHARS
+    assert classify(200, "text/html", visible, html) == Verdict("ok")
+
+
+def test_phrase_markers_do_not_match_markup():
+    html = '<main><a href="/login">Please log in</a></main>'
+    text = "The county commission reviewed the license plate reader contract. " * 5
+    assert classify(200, "text/html", text, html) == Verdict("ok")
 
 
 def test_long_article_ignores_wall_words():
