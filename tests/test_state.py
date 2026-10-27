@@ -205,6 +205,18 @@ def test_mark_topic_status(tmp_path):
     assert load_run(tmp_path)["topics"][0]["status"] == "complete"
 
 
+def test_mark_topic_status_rejects_superseded_topic(tmp_path):
+    from state import create_run, init_topic, mark_topic_status, save_state
+    run = create_run(tmp_path, run_id="r1", tier="full")
+    run["topics"] = [init_topic("X", mode="web_research", depth="standard"),
+                     init_topic("Y", mode="web_research", depth="standard")]
+    run["topics"][0]["status"] = "superseded"
+    save_state(tmp_path, run)
+
+    with pytest.raises(ValueError, match="superseded"):
+        mark_topic_status(tmp_path, topic_name="X", status="complete")
+
+
 def test_append_confidence(tmp_path):
     from state import create_run, init_topic, append_confidence, save_state, load_run
     run = create_run(tmp_path, run_id="r1", tier="full")
