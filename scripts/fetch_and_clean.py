@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -207,6 +208,10 @@ def _has_unsafe(attempts: list[dict]) -> bool:
     return any(a["verdict"] == "unsafe" for a in attempts)
 
 
+def _has_captcha(attempts: list[dict]) -> bool:
+    return any(a["reason"] == "captcha" for a in attempts)
+
+
 def _fallback_order(attempts: list[dict]) -> list[str]:
     kinds = {a["verdict"] for a in attempts}
     if "missing" in kinds and "blocked" not in kinds:
@@ -222,7 +227,7 @@ def fallback(url: str, first: FetchResult, attempts: list[dict], session, cache_
         return None
     for step in _fallback_order(attempts):
         if step == "playwright":
-            if any(a["reason"] == "captcha" for a in attempts):
+            if _has_captcha(attempts):
                 continue  # captcha is terminal for automatic live-site fetchers
             if session is None or not session.available:
                 attempts.append({"method": "playwright", "verdict": "skipped", "reason": "playwright_unavailable"})
@@ -375,7 +380,9 @@ def process_urls(
     failed: list[dict] = []
     needs_browser: list[dict] = []
     if pending:
-        with BrowserSession() as session:
+        # Chromium only starts if some URL will actually reach the playwright step.
+        wants_browser = any(not _has_unsafe(a) and not _has_captcha(a) for _, _, a in pending)
+        with (BrowserSession() if wants_browser else contextlib.nullcontext(None)) as session:
             for url, first, attempts in pending:
                 result = fallback(url, first, attempts, session, cache_dir)
                 if result is not None:

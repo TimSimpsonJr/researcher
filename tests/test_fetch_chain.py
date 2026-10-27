@@ -399,6 +399,29 @@ def test_no_browser_when_nothing_failed(monkeypatch, tmp_path):
     assert len(fetched) == 1 and failed == [] and needs_browser == []
 
 
+def test_browser_not_opened_when_no_url_can_use_it(monkeypatch, tmp_path):
+    wall, local = "https://a.example/captcha", "http://localhost/x"
+    _first(monkeypatch, {wall: bad("blocked", "captcha"), local: bad("unsafe", "ssrf")})
+    monkeypatch.setattr(fetch_and_clean, "BrowserSession", lambda: pytest.fail("browser opened"))
+    monkeypatch.setattr(fetch_and_clean.wayback, "fetch",
+                        lambda u, c: bad("missing", "no_snapshot", "wayback"))
+    fetched, failed, needs_browser = fetch_and_clean.process_urls(
+        [{"url": wall}, {"url": local}], tmp_path, 7, None)
+    assert fetched == [] and [n["url"] for n in needs_browser] == [wall]
+    assert [f["url"] for f in failed] == [local]
+
+
+def test_browser_opened_when_one_url_can_use_it(monkeypatch, tmp_path):
+    wall, thin = "https://a.example/captcha", "https://a.example/thin"
+    _first(monkeypatch, {wall: bad("blocked", "captcha"), thin: bad("thin", "0_chars")})
+    session = FakeSession(ok("playwright"))
+    monkeypatch.setattr(fetch_and_clean, "BrowserSession", lambda: session)
+    monkeypatch.setattr(fetch_and_clean.wayback, "fetch",
+                        lambda u, c: bad("missing", "no_snapshot", "wayback"))
+    fetched, _, _ = fetch_and_clean.process_urls([{"url": wall}, {"url": thin}], tmp_path, 7, None)
+    assert session.entered == 1 and session.calls == [thin] and [f["url"] for f in fetched] == [thin]
+
+
 def test_cache_hit_skips_fetch(monkeypatch, tmp_path):
     url = "https://a.example/cached"
     fetch_and_clean.save_cache(tmp_path, fetch_and_clean.url_cache_key(url), {
