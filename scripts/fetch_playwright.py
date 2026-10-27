@@ -182,14 +182,3 @@ class BrowserSession:
         if not looks_like_pdf("", ctype, body[:5]):
             return FetchResult(Verdict("thin", "not_a_pdf"), method="playwright", content_type=ctype)
         return to_result(body, cache_dir)
-
-
-def fetch_via_playwright(url: str) -> tuple[str, str]:
-    """One-shot (content, title) fetch in a throwaway session. Raises RuntimeError."""
-    with BrowserSession() as session:
-        if not session.available:
-            raise RuntimeError("playwright not available")
-        result = session.fetch(url, PROFILE_DIR.parent / "fetch")
-    if not result.verdict.ok:
-        raise RuntimeError(f"playwright fetch failed: {result.verdict.kind} {result.verdict.reason}")
-    return result.content, result.title
