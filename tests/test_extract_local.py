@@ -12,7 +12,7 @@ def test_extract_pdf(tmp_path):
     from extract_local import extract_file
     pdf_path = tmp_path / "test.pdf"
     pdf_path.write_bytes(b"fake pdf")
-    with patch("extract_local.fitz") as mock_fitz:
+    with patch("extract_local.pymupdf") as mock_fitz:
         mock_doc = MagicMock()
         mock_page = MagicMock()
         mock_page.get_text.return_value = "Page 1 content about surveillance"
