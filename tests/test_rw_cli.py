@@ -434,7 +434,13 @@ def _needs_browser_results(vault):
     })
 
 
-def test_add_browser_fetch_moves_url_out_of_needs_browser(active_run, cli, tmp_path):
+@pytest.fixture
+def no_dns(monkeypatch):
+    import fetch_and_clean
+    monkeypatch.setattr(fetch_and_clean, "validate_url", lambda url: None)
+
+
+def test_add_browser_fetch_moves_url_out_of_needs_browser(active_run, cli, tmp_path, no_dns):
     import fetch_and_clean
     results = _needs_browser_results(active_run)
     page = active_run / "page.md"
@@ -454,7 +460,7 @@ def test_add_browser_fetch_moves_url_out_of_needs_browser(active_run, cli, tmp_p
     assert PDF_URL in _run_file(active_run)["topics"][0]["seen_urls"]
 
 
-def test_add_browser_fetch_also_clears_failed(active_run, cli, tmp_path):
+def test_add_browser_fetch_also_clears_failed(active_run, cli, tmp_path, no_dns):
     results = _needs_browser_results(active_run)
     data = json.loads(results.read_text(encoding="utf-8"))
     data["failed"] = [{"url": PDF_URL, "error": "x", "attempts": []}]
@@ -474,12 +480,12 @@ def test_add_browser_fetch_rejects_internal_url(active_run, cli, tmp_path):
     page = active_run / "page.md"
     page.write_text("x", encoding="utf-8")
     code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR",
-                       "--url", "http://127.0.0.1/admin", "--content-file", page, "--cache-dir", tmp_path / "cache")
+                       "--url", "http://10.0.0.5/admin", "--content-file", page, "--cache-dir", tmp_path / "cache")
     assert code == 1 and err.startswith("ERROR:") and "Blocked" in err
     assert results.read_text(encoding="utf-8") == before
 
 
-def test_add_browser_fetch_needs_the_hop_file(active_run, cli, tmp_path):
+def test_add_browser_fetch_needs_the_hop_file(active_run, cli, tmp_path, no_dns):
     page = active_run / "page.md"
     page.write_text("x", encoding="utf-8")
     code, _, err = cli("add-browser-fetch", "--hop", "9", "--topic", "Greenville ALPR", "--url", PDF_URL,
@@ -487,7 +493,55 @@ def test_add_browser_fetch_needs_the_hop_file(active_run, cli, tmp_path):
     assert code == 1 and "fetch_results_hop9.json not found" in err
 
 
-def test_add_browser_fetch_unknown_topic_leaves_file_alone(active_run, cli, tmp_path):
+def _unchanged_after(active_run, cli, tmp_path, content_file, expect):
+    results = _needs_browser_results(active_run)
+    before = results.read_text(encoding="utf-8")
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                       "--content-file", content_file, "--cache-dir", tmp_path / "cache")
+    assert code == 1 and expect in err
+    assert results.read_text(encoding="utf-8") == before
+    assert _run_file(active_run)["topics"][0]["seen_urls"] == []
+    assert not (tmp_path / "cache").exists()
+
+
+def test_add_browser_fetch_missing_content_file_changes_nothing(active_run, cli, tmp_path, no_dns):
+    _unchanged_after(active_run, cli, tmp_path, active_run / "nope.md", "ERROR:")
+
+
+def test_add_browser_fetch_empty_content_file_changes_nothing(active_run, cli, tmp_path, no_dns):
+    page = active_run / "empty.md"
+    page.write_text("  \n", encoding="utf-8")
+    _unchanged_after(active_run, cli, tmp_path, page, "content file is empty")
+
+
+def test_add_browser_fetch_truncates_output_but_caches_full_text(active_run, cli, tmp_path, no_dns):
+    import fetch_and_clean
+    results = _needs_browser_results(active_run)
+    page = active_run / "big.md"
+    page.write_text("a" * (fetch_and_clean.MAX_CONTENT_CHARS + 500), encoding="utf-8")
+    cache = tmp_path / "cache"
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                       "--content-file", page, "--cache-dir", cache)
+    assert code == 0, err
+    data = json.loads(results.read_text(encoding="utf-8"))
+    assert len(data["fetched"][0]["content"]) == fetch_and_clean.MAX_CONTENT_CHARS
+    cached = fetch_and_clean.load_cache(cache, fetch_and_clean.url_cache_key(PDF_URL))
+    assert len(cached["content"]) == fetch_and_clean.MAX_CONTENT_CHARS + 500
+
+
+def test_add_browser_fetch_twice_keeps_one_record(active_run, cli, tmp_path, no_dns):
+    results = _needs_browser_results(active_run)
+    page = active_run / "page.md"
+    page.write_text("some text here", encoding="utf-8")
+    for _ in range(2):
+        code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                           "--content-file", page, "--cache-dir", tmp_path / "cache")
+        assert code == 0, err
+    data = json.loads(results.read_text(encoding="utf-8"))
+    assert len(data["fetched"]) == 1 and data["stats"]["fetched"] == 1
+
+
+def test_add_browser_fetch_unknown_topic_leaves_file_alone(active_run, cli, tmp_path, no_dns):
     results = _needs_browser_results(active_run)
     before = results.read_text(encoding="utf-8")
     page = active_run / "page.md"

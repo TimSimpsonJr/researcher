@@ -309,8 +309,10 @@ def cmd_add_browser_fetch(args):
     # fetch_and_clean pulls in pymupdf/playwright; import it only for this command.
     import fetch_and_clean
     fetch_and_clean.validate_url(args.url)  # same SSRF guard as every other fetch
+    content = Path(args.content_file).read_text(encoding="utf-8")  # before any state write
+    if not content.strip():
+        raise CLIError("content file is empty")
     add_seen_urls(sd, topic_name=args.topic, urls=[args.url])  # validates the topic first
-    content = Path(args.content_file).read_text(encoding="utf-8")
     record = fetch_and_clean.add_browser_fetch(results, args.url, args.title, content, Path(args.cache_dir or fetch_and_clean.DEFAULT_CACHE_DIR))
     _out({"url": args.url, "hop": args.hop, "word_count": record["word_count"]})
 

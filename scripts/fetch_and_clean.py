@@ -397,7 +397,9 @@ def add_browser_fetch(results_path: Path, url: str, title: str, content: str, ca
     """Record a page the orchestrator read in its own browser (SKILL Stage 4b).
 
     Caches it with fetch_method "browser", appends it to the hop's fetched list,
-    drops the URL from needs_browser and failed, and refreshes stats.
+    drops the URL from needs_browser and failed, and refreshes stats. The cache
+    write is deliberately not best-effort (unlike _store): the page was read by
+    hand, so a failed write must surface rather than lose it silently.
     """
     data = json.loads(results_path.read_text(encoding="utf-8"))
     entry = {
