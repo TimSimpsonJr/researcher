@@ -379,6 +379,7 @@ def apply_replan_readmit(
     overwrites whatever was there.
 
     Raises KeyError if any topic_name does not exist in the run.
+    Raises ValueError for a superseded topic (nothing is saved).
     Raises RuntimeError if there is no active run.
     """
     run = load_run(state_dir)
@@ -390,6 +391,8 @@ def apply_replan_readmit(
         if name not in topics_by_name:
             raise KeyError(f"Topic not found: {name}")
         t = topics_by_name[name]
+        if t.get("status") == "superseded":
+            raise ValueError(f"Topic is superseded: {name}")
         if spec.get("replan_hint") is not None:
             t["replan_hint"] = spec["replan_hint"]
         t["max_hops"] += 1

@@ -217,6 +217,20 @@ def test_mark_topic_status_rejects_superseded_topic(tmp_path):
         mark_topic_status(tmp_path, topic_name="X", status="complete")
 
 
+def test_replan_readmit_rejects_superseded_topic_and_changes_nothing(tmp_path):
+    from state import apply_replan_readmit, create_run, init_topic, load_run, save_state
+    run = create_run(tmp_path, run_id="r1", tier="full")
+    run["topics"] = [init_topic("X", mode="web_research", depth="standard"),
+                     init_topic("Y", mode="web_research", depth="standard")]
+    run["topics"][1]["status"] = "superseded"
+    save_state(tmp_path, run)
+    before = load_run(tmp_path)
+
+    with pytest.raises(ValueError, match="superseded"):
+        apply_replan_readmit(tmp_path, [{"topic_name": "X"}, {"topic_name": "Y"}], increment_replan_counter=True)
+    assert load_run(tmp_path) == before
+
+
 def test_append_confidence(tmp_path):
     from state import create_run, init_topic, append_confidence, save_state, load_run
     run = create_run(tmp_path, run_id="r1", tier="full")
