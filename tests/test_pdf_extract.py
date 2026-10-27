@@ -7,6 +7,7 @@ import pymupdf
 import pytest
 
 import pdf_extract
+from block_detect import Verdict
 
 LINE = "Board meeting minutes: the council approved the camera contract, page {}."
 
@@ -39,7 +40,7 @@ def _blank_pdf(n_pages: int) -> bytes:
 
 def test_html_bytes_are_not_a_pdf(tmp_path, no_ocr):
     r = pdf_extract.to_result(b"<html><body>Access denied</body></html>", tmp_path)
-    assert not r.verdict.ok and r.verdict.reason == "not_pdf"
+    assert r.verdict == Verdict("thin", "not_a_pdf")  # not a site wall, so never needs_browser
     assert not (tmp_path / "pdf").exists()
 
 

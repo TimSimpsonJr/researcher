@@ -97,7 +97,7 @@ def to_result(pdf_bytes: bytes, cache_dir: Path) -> FetchResult:
     """extract() as a FetchResult. An image-only PDF is ok: the visual read covers it."""
     if b"%PDF" not in pdf_bytes[:1024]:  # pymupdf happily opens HTML as a "pdf"
         return FetchResult(
-            verdict=blocked("not_pdf"), method="pdf-local", content_type="application/pdf"
+            verdict=Verdict("thin", "not_a_pdf"), method="pdf-local", content_type="application/pdf"
         )
     try:
         with _PDF_LOCK:
