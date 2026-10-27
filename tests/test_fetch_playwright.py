@@ -7,12 +7,14 @@ import functools
 import http.server
 import sys
 import threading
+import types
 from pathlib import Path
 
 import pytest
 
 import fetch_playwright
 from block_detect import FetchResult, Verdict
+from url_safety import UnsafeURLError
 
 PAGES = Path(__file__).parent / "fixtures" / "pages"
 CF_HTML = (PAGES / "cloudflare.html").read_text(encoding="utf-8")
@@ -39,16 +41,19 @@ class FakeResponse:
 
 
 class FakePage:
-    def __init__(self, htmls, response=None, goto_error=None):
+    def __init__(self, htmls, response=None, goto_error=None, final_url=None):
         self.htmls = list(htmls)
         self.response = response or FakeResponse()
         self.goto_error = goto_error
+        self.final_url = final_url
+        self.url = ""
         self.waits = 0
         self.visited = []
         self.closed = False
 
     def goto(self, url, timeout, wait_until):
         self.visited.append(url)
+        self.url = self.final_url or url
         if self.goto_error:
             raise self.goto_error
         return self.response
@@ -71,7 +76,7 @@ class FakeRequest:
         self.response = response
         self.urls = []
 
-    def get(self, url, timeout):
+    def get(self, url, timeout, max_redirects=20):
         self.urls.append(url)
         return self.response
 
@@ -161,6 +166,150 @@ def test_pdf_403_is_blocked(tmp_path, fake_pdf):
     assert fake_pdf == []
 
 
+def _reject(monkeypatch, *needles):
+    def check(url):
+        if any(n in url for n in needles):
+            raise UnsafeURLError(f"Blocked: {url}")
+    monkeypatch.setattr(fetch_playwright, "validate_url", check)
+
+
+class FakeRoute:
+    def __init__(self, url):
+        self.request = types.SimpleNamespace(url=url)
+        self.outcome = None
+
+    def continue_(self):
+        self.outcome = "continue"
+
+    def abort(self, code):
+        self.outcome = code
+
+
+def test_guard_aborts_internal_hosts_and_caches_lookups(monkeypatch):
+    calls = []
+
+    def check(url):
+        calls.append(url)
+        if "127.0.0.1" in url:
+            raise UnsafeURLError(url)
+
+    monkeypatch.setattr(fetch_playwright, "validate_url", check)
+    session = fetch_playwright.BrowserSession()
+    routes = [FakeRoute(u) for u in (
+        "https://a.gov/x", "https://a.gov/y", "http://127.0.0.1:9/z", "data:text/plain,hi")]
+    for route in routes:
+        session._guard(route)
+    assert [r.outcome for r in routes] == ["continue", "continue", "blockedbyclient", "continue"]
+    assert sum("a.gov" in c for c in calls) == 1
+
+
+def test_navigation_ending_on_internal_host_is_refused(tmp_path, monkeypatch):
+    _reject(monkeypatch, "127.0.0.1")
+    page = FakePage([ARTICLE_HTML], final_url="http://127.0.0.1/admin")
+    with pytest.raises(UnsafeURLError):
+        _session(FakeContext(page)).fetch("https://a.gov/minutes", tmp_path)
+    assert page.closed
+
+
+def test_blocked_redirect_hop_is_unsafe_not_blocked(tmp_path):
+    page = FakePage([""], goto_error=RuntimeError("net::ERR_BLOCKED_BY_CLIENT at https://a.gov/r"))
+    with pytest.raises(UnsafeURLError):
+        _session(FakeContext(page)).fetch("https://a.gov/r", tmp_path)
+
+
+class RedirectRequest:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def get(self, url, timeout, max_redirects=20):
+        self.calls.append((url, max_redirects))
+        return self.responses.pop(0)
+
+
+def test_pdf_redirects_are_validated_per_hop(tmp_path, monkeypatch, fake_pdf):
+    _reject(monkeypatch, "127.0.0.1")
+    context = FakeContext(FakePage([""]))
+    context.request = RedirectRequest([
+        FakeResponse(302, {"location": "/next", "content-type": "text/html"}),
+        FakeResponse(302, {"location": "http://127.0.0.1/secret.pdf", "content-type": "text/html"}),
+    ])
+    with pytest.raises(UnsafeURLError):
+        _session(context).fetch("https://a.gov/packet.pdf", tmp_path)
+    assert context.request.calls == [("https://a.gov/packet.pdf", 0), ("https://a.gov/next", 0)]
+    assert fake_pdf == []
+
+
+class FakePlaywright:
+    def __init__(self, launch_results):
+        self.launch_results = list(launch_results)
+        self.launches = []
+        self.stopped = False
+        self.chromium = self
+
+    def start(self):
+        return self
+
+    def stop(self):
+        self.stopped = True
+
+    def launch_persistent_context(self, profile, **kwargs):
+        self.launches.append((profile, kwargs))
+        result = self.launch_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class GuardedContext:
+    def __init__(self):
+        self.routes = []
+        self.closed = False
+
+    def route(self, pattern, handler):
+        self.routes.append((pattern, handler))
+
+    def close(self):
+        self.closed = True
+
+
+def _install_fake_playwright(monkeypatch, fake):
+    api = types.ModuleType("playwright.sync_api")
+    api.sync_playwright = lambda: fake
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", api)
+
+
+def test_locked_profile_retries_in_a_temp_profile(tmp_path, monkeypatch):
+    ctx = GuardedContext()
+    fake = FakePlaywright([RuntimeError("profile in use"), ctx])
+    _install_fake_playwright(monkeypatch, fake)
+    session = fetch_playwright.BrowserSession(profile_dir=tmp_path / "profile")
+    with session:
+        assert session.available
+        temp = Path(session._tmp_profile)
+        assert temp.exists() and fake.launches[1][0] == str(temp)
+        assert fake.launches[0][1]["service_workers"] == "block"
+        assert ctx.routes and ctx.routes[0][0] == "**/*"
+    assert not temp.exists() and ctx.closed
+
+
+def test_launch_failing_twice_is_unavailable(tmp_path, monkeypatch):
+    fake = FakePlaywright([RuntimeError("no chromium"), RuntimeError("no chromium")])
+    _install_fake_playwright(monkeypatch, fake)
+    with fetch_playwright.BrowserSession(profile_dir=tmp_path / "profile") as session:
+        assert session.available is False
+    assert fake.stopped
+
+
+def test_browser_crash_marks_session_unavailable(tmp_path):
+    page = FakePage([""], goto_error=RuntimeError("Target page, context or browser has been closed"))
+    session = _session(FakeContext(page))
+    with pytest.raises(RuntimeError):
+        session.fetch("https://a.gov/x", tmp_path)
+    assert session.available is False
+
+
 def test_session_without_playwright_is_unavailable(monkeypatch):
     monkeypatch.setitem(sys.modules, "playwright", None)
     monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
@@ -216,3 +365,61 @@ def test_real_browser_reads_file_html_and_served_pdf(tmp_path, monkeypatch):
     assert "camera contract" in html_result.content
     assert pdf_result.verdict.ok and pdf_result.method == "pdf-local"
     assert "twelve additional readers" in pdf_result.content
+
+
+@pytest.mark.browser
+def test_real_browser_blocks_subrequests_and_redirects_to_internal_hosts(tmp_path, monkeypatch):
+    _chromium_or_skip()
+    hits = []
+
+    class B(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"x")
+
+        def log_message(self, *args):
+            pass
+
+    server_b = http.server.ThreadingHTTPServer(("127.0.0.1", 0), B)
+    port_b = server_b.server_address[1]
+
+    class A(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/r":
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{port_b}/secret")
+                self.end_headers()
+                return
+            body = (f'<html><head><title>P</title></head><body><p>{"Public page text. " * 20}</p>'
+                    f'<img src="http://127.0.0.1:{port_b}/ping"></body></html>').encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server_a = http.server.ThreadingHTTPServer(("127.0.0.1", 0), A)
+    port_a = server_a.server_address[1]
+    for s in (server_a, server_b):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+
+    def check(url):
+        if f":{port_b}/" in url:
+            raise UnsafeURLError(url)
+
+    monkeypatch.setattr(fetch_playwright, "validate_url", check)
+    try:
+        with fetch_playwright.BrowserSession(profile_dir=tmp_path / "profile") as session:
+            assert session.available
+            ok = session.fetch(f"http://127.0.0.1:{port_a}/page", tmp_path / "cache")
+            assert ok.verdict.ok
+            with pytest.raises(UnsafeURLError):
+                session.fetch(f"http://127.0.0.1:{port_a}/r", tmp_path / "cache")
+    finally:
+        server_a.shutdown()
+        server_b.shutdown()
+    assert hits == []
