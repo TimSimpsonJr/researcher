@@ -186,7 +186,7 @@ def test_every_rw_subcommand_referenced_exists():
 _SETUP_MD = _REPO / "skills" / "researcher-setup" / "SKILL.md"
 _RUNNER_MD = _REPO / "agents" / "fetch-summarize-runner.md"
 _INSTALL = ('PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" '
-            'uv run --frozen --project "REPO" playwright install chromium')
+            'uv run --frozen --project "REPO" playwright install chromium --only-shell')
 
 
 def _section(text: str, start: str, end: str) -> str:
@@ -213,7 +213,9 @@ def test_stage_4b_browser_pass_routes_needs_browser():
         "mcp__Claude_Browser__navigate", "mcp__Claude_Browser__get_page_text",
         "mcp__Claude_Browser__javascript_tool",
         "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs",
-        "pdf.worker.min.mjs", "after the browser pass",
+        "pdf.worker.min.mjs", "If `fetched` is still empty after the browser pass",
+        "pdf_unreadable", "max_chars", ".slice(0, 50000)", "exact host",
+        "`{index}` = the entry's position in `needs_browser`",
     ):
         assert needle in s, needle
 
@@ -221,13 +223,16 @@ def test_stage_4b_browser_pass_routes_needs_browser():
 def test_stage_4d_and_runner_read_image_only_pdfs():
     s = _section(_SKILL_MD.read_text(encoding="utf-8"), "### 4d. Summarize", "### 4e.")
     assert "image_only_pdf" in s and "pdf_path" in s and "needs visual read" in s
+    assert "the item's `url`, `title` and `pdf_path`" in s
     runner = _RUNNER_MD.read_text(encoding="utf-8")
-    assert "image_only_pdf" in runner and "pdf_path" in runner and "needs_browser" in runner
+    assert "Image-only PDF:" in runner and "pdf_path" in runner and "needs_browser" in runner
+    assert "on the Ollama path, for items with reason `needs visual read`" in runner
 
 
 def test_stage_6a_drops_unread_visual_items():
     s = _section(_SKILL_MD.read_text(encoding="utf-8"), "### 6a. Aggregate", "### 6b.")
     assert "needs visual read" in s and "usable" in s
+    assert 'add-manual-url --vault "VAULT" --url "URL" --reason "needs visual read"' in s
 
 
 def test_stage_10b_lists_manual_urls():
@@ -238,5 +243,6 @@ def test_stage_10b_lists_manual_urls():
 def test_setup_installs_chromium_and_checks_tesseract():
     setup = _SETUP_MD.read_text(encoding="utf-8")
     assert _INSTALL in setup
+    assert "headless shell" in setup and "playwright install chromium\n" not in setup
     assert 'rw.py" check playwright' in setup and 'rw.py" check tesseract' in setup
     assert "winget install UB-Mannheim.TesseractOCR" in setup

@@ -88,9 +88,9 @@ If `fetched` is empty, return `{ "items": [], "manual_urls": [...] }` and stop.
   into `{ summary, source_type, key_entities, key_claims }`: a 3–6 sentence
   factual summary, the source type, the named entities, and the notable claims.
 
-- **Image-only rule (both paths):** when a fetched entry has `image_only_pdf: true`
-  (its prepared file has an `Image-only PDF:` line), Read the PDF at its `pdf_path`
-  with the Read tool, up to 20 pages per call, and summarize from the page images.
+- **Image-only rule:** on the Ollama path, for items with reason `needs visual read`;
+  on the base path, for files with an `Image-only PDF:` line: Read the PDF at its
+  `pdf_path` with the Read tool, up to 20 pages per call, and summarize from the page images.
 
 **4. Assemble.** For each summarized article, produce one item and **copy the
 credibility signals from the matching `selected_urls` entry (match by `url`)**:

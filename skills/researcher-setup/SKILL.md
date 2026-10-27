@@ -35,9 +35,9 @@ Then check the local browser fallback, which reads pages and PDFs that block scr
 ```bash
 uv run --frozen --project "REPO" "REPO/scripts/rw.py" check playwright
 ```
-If `status` is not `ok`, use AskUserQuestion: "Download Chromium for the local browser fallback (about 150 MB)? [yes / skip]". On yes:
+If `status` is not `ok`, use AskUserQuestion: "Download Chromium's headless shell for the local browser fallback (roughly 100–300 MB download, stored in REPO/.cache)? [yes / skip]". On yes:
 ```bash
-PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" uv run --frozen --project "REPO" playwright install chromium
+PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" uv run --frozen --project "REPO" playwright install chromium --only-shell
 ```
 Then run the check again and report the result. On skip, note that pages behind bot walls will go to the orchestrator's browser or the manual-read list instead.
 
