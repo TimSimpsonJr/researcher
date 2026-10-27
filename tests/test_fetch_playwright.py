@@ -561,16 +561,12 @@ def test_no_stealth_or_user_agent_override():
 
 
 def _chromium_or_skip():
-    fetch_playwright.use_repo_browsers()
-    sync_api = pytest.importorskip("playwright.sync_api")
-    try:
-        with sync_api.sync_playwright() as p:
-            exe = Path(p.chromium.executable_path)
-    except Exception as exc:
-        pytest.skip(f"playwright unusable: {exc}")
-    if not exe.exists():
+    from detect_tier import check_playwright
+    pytest.importorskip("playwright.sync_api")
+    result = check_playwright()  # accepts the headless shell (--only-shell) as well as full Chromium
+    if result["status"] != "ok":
         pytest.skip("Chromium not installed (PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright "
-                    "uv run --frozen playwright install chromium)")
+                    "uv run --frozen playwright install chromium --only-shell)")
 
 
 @pytest.mark.browser

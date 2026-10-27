@@ -5,6 +5,7 @@ Checks for Ollama, SearXNG, yt-dlp, Whisper. Provides hardware-aware
 model recommendations for Ollama.
 """
 
+import os
 import shutil
 import subprocess
 import platform
@@ -92,8 +93,19 @@ def check_whisper() -> dict:
 
 
 PLAYWRIGHT_INSTALL = ('PLAYWRIGHT_BROWSERS_PATH="<plugin root>/.cache/ms-playwright" '
-                      'uv run --frozen --project "<plugin root>" playwright install chromium')
+                      'uv run --frozen --project "<plugin root>" playwright install chromium --only-shell')
 TESSERACT_INSTALL = "winget install UB-Mannheim.TesseractOCR"
+
+
+def _headless_shell() -> Path | None:
+    """The chromium headless shell BrowserSession launches (headless=True), if downloaded."""
+    base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if not base:
+        return None
+    for exe in sorted(Path(base).glob("chromium_headless_shell-*/*/chrome-headless-shell*")):
+        if exe.is_file():
+            return exe
+    return None
 
 
 def check_playwright() -> dict:
@@ -113,6 +125,8 @@ def check_playwright() -> dict:
     except Exception as e:
         return {"status": "error", "reason": f"playwright failed to start: {e}"}
     if not exe.exists():
+        exe = _headless_shell()
+    if exe is None or not exe.exists():
         return {"status": "missing", "reason": "Chromium not downloaded", "install": PLAYWRIGHT_INSTALL}
     return {"status": "ok", "executable": str(exe)}
 
