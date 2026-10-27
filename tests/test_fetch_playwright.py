@@ -5,6 +5,7 @@ and skips when Playwright or its Chromium build is missing."""
 
 import functools
 import http.server
+import os
 import sys
 import threading
 import types
@@ -346,6 +347,18 @@ def test_locked_profile_retries_in_a_temp_profile(tmp_path, monkeypatch):
         assert ctx.routes and ctx.routes[0][0] == "**/*"
     assert not temp.exists() and ctx.closed
     assert session._tmp_profile is None
+
+
+def test_browsers_live_in_the_repo_cache_unless_overridden(tmp_path, monkeypatch):
+    _install_fake_playwright(monkeypatch, FakePlaywright([GuardedContext(), GuardedContext()]))
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "x")
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH")
+    with fetch_playwright.BrowserSession(profile_dir=tmp_path / "p1"):
+        assert Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"]) == fetch_playwright.BROWSERS_PATH
+    assert fetch_playwright.BROWSERS_PATH.parts[-2:] == (".cache", "ms-playwright")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "custom")
+    with fetch_playwright.BrowserSession(profile_dir=tmp_path / "p2"):
+        assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == "custom"
 
 
 def test_launch_failing_twice_is_unavailable(tmp_path, monkeypatch):

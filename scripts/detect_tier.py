@@ -13,6 +13,7 @@ from pathlib import Path
 
 import requests
 
+import fetch_playwright
 import pdf_extract
 
 
@@ -93,12 +94,14 @@ def check_whisper() -> dict:
         return {"installed": False, "backend": None}
 
 
-PLAYWRIGHT_INSTALL = 'uv run --frozen --project "<plugin root>" playwright install chromium'
+PLAYWRIGHT_INSTALL = ('PLAYWRIGHT_BROWSERS_PATH="<plugin root>/.cache/ms-playwright" '
+                      'uv run --frozen --project "<plugin root>" playwright install chromium')
 TESSERACT_INSTALL = "winget install UB-Mannheim.TesseractOCR"
 
 
 def check_playwright() -> dict:
     """Playwright importable AND its Chromium build downloaded."""
+    fetch_playwright.use_repo_browsers()
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:

@@ -13,6 +13,7 @@ patches and no user-agent changes.
 Uses Playwright's sync API: one session, one thread.
 """
 
+import os
 import shutil
 import sys
 import tempfile
@@ -26,6 +27,16 @@ from text_utils import html_to_text
 from url_safety import UnsafeURLError, validate_url
 
 PROFILE_DIR = Path(__file__).parent.parent / ".cache" / "browser-profile"
+# Browsers live in the repo cache, not %LOCALAPPDATA%: under the Claude desktop (MSIX) app that
+# path is virtualized and full Chromium cannot be spawned from it.
+BROWSERS_PATH = Path(__file__).parent.parent / ".cache" / "ms-playwright"
+
+
+def use_repo_browsers() -> None:
+    """Point Playwright at the repo-local browser cache unless the caller already chose one."""
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(BROWSERS_PATH))
+
+
 NAV_TIMEOUT_MS = 30_000
 CHALLENGE_WAIT_S = 15.0
 POLL_MS = 1000
@@ -47,6 +58,7 @@ class BrowserSession:
         self._host_ok: dict[tuple[str, str], bool] = {}
 
     def __enter__(self):
+        use_repo_browsers()
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:

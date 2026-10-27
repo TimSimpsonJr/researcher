@@ -129,6 +129,17 @@ def test_playwright_detection_needs_chromium(monkeypatch, tmp_path):
     assert result["status"] == "missing" and "playwright install chromium" in result["install"]
 
 
+def test_playwright_check_uses_the_repo_browser_cache(monkeypatch, tmp_path):
+    import os
+    from detect_tier import check_playwright
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "x")
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH")
+    _fake_playwright(monkeypatch, tmp_path / "chrome.exe")
+    result = check_playwright()
+    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"].replace("\\", "/").endswith(".cache/ms-playwright")
+    assert "PLAYWRIGHT_BROWSERS_PATH=" in result["install"] and ".cache/ms-playwright" in result["install"]
+
+
 def test_playwright_detection_when_available(monkeypatch, tmp_path):
     from detect_tier import check_playwright
     exe = tmp_path / "chrome.exe"
