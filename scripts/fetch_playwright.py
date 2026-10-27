@@ -209,6 +209,7 @@ class BrowserSession:
                 try:
                     self._goto_target = target
                     response = page.goto(target, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                    self._goto_target = None  # later (script-initiated) navigations are not ours
                     break
                 except Exception as exc:
                     # The guard aborts a redirected chain and records where it ended: go there

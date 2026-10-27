@@ -303,6 +303,29 @@ def test_script_initiated_redirected_navigation_is_fulfilled_not_recorded(monkey
     assert route.outcome[0] == "fulfill" and idle._last_nav_url == {}
 
 
+def test_redirect_to_the_pages_own_url_after_goto_is_fulfilled(monkeypatch):
+    session = fetch_playwright.BrowserSession()
+    session._goto_target = None  # goto() has returned
+    final = FakeResponse(200)
+    route = FakeRoute("https://a.gov/page", navigation=True, fetched={
+        "https://a.gov/page": FakeResponse(302, {"location": "/other"}), "https://a.gov/other": final})
+    session._guard(route)
+    assert route.outcome == ("fulfill", final) and session._last_nav_url == {}
+
+
+def test_goto_target_is_cleared_as_soon_as_goto_returns(tmp_path):
+    seen = []
+
+    class SpyPage(FakePage):
+        def content(self):
+            seen.append(session._goto_target)
+            return super().content()
+
+    session = _session(FakeContext(SpyPage([ARTICLE_HTML])))
+    session.fetch("https://a.gov/minutes", tmp_path)
+    assert seen == [None]
+
+
 def test_redirected_subframe_navigation_is_fulfilled_not_recorded(monkeypatch):
     session = fetch_playwright.BrowserSession()
     final = FakeResponse(200)
