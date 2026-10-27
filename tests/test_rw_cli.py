@@ -452,6 +452,7 @@ def test_add_browser_fetch_moves_url_out_of_needs_browser(active_run, cli, tmp_p
     assert out == {"url": PDF_URL, "hop": "1", "word_count": 90}
     data = json.loads(results.read_text(encoding="utf-8"))
     assert [(f["url"], f["fetch_method"], f["title"]) for f in data["fetched"]] == [(PDF_URL, "browser", "Board package")]
+    assert data["fetched"][0]["fetched_via"] == "browser"
     assert data["needs_browser"] == []
     assert data["stats"] == {"total_urls": 1, "fetched": 1, "failed": 0, "needs_browser": 0,
                              "cache_hits": 0, "total_words": 90}

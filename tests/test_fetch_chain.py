@@ -431,6 +431,25 @@ def test_pdf_fields_round_trip_through_cache(monkeypatch, tmp_path):
     assert again[0]["image_only_pdf"] is True and again[0]["pdf_path"] == "C:/cache/pdf/ab.pdf"
 
 
+def test_record_says_how_it_was_fetched(monkeypatch, tmp_path):
+    first, walled = "https://a.example/ok", "https://a.example/wall"
+    _first(monkeypatch, {first: ok(), walled: bad("blocked", "cloudflare")})
+    monkeypatch.setattr(fetch_and_clean, "BrowserSession", lambda: FakeSession(ok("playwright")))
+    fetched, _, _ = fetch_and_clean.process_urls([{"url": first}, {"url": walled}], tmp_path, 7, None)
+    assert {f["url"]: f["fetched_via"] for f in fetched} == {first: "jina", walled: "playwright"}
+    _no_first(monkeypatch)
+    again, _, _ = fetch_and_clean.process_urls([{"url": first}, {"url": walled}], tmp_path, 7, None)
+    assert {f["url"]: f["fetched_via"] for f in again} == {first: "jina", walled: "playwright"}
+
+
+def test_pdf_record_is_fetched_via_direct(chain, tmp_path):
+    calls, results = chain
+    results["jina"] = ok()
+    results["direct"] = ok("pdf-local")
+    fetched, _, _ = fetch_and_clean.process_urls([{"url": "https://a.example/p.pdf"}], tmp_path, 7, None)
+    assert fetched[0]["fetch_method"] == "pdf-local" and fetched[0]["fetched_via"] == "direct"
+
+
 def test_html_records_have_no_pdf_fields(monkeypatch, tmp_path):
     _first(monkeypatch, {"https://a.example/1": ok()})
     fetched, _, _ = fetch_and_clean.process_urls([{"url": "https://a.example/1"}], tmp_path, 7, None)

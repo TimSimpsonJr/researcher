@@ -277,6 +277,8 @@ def _record(entry: dict, cache_hit: bool) -> dict:
         "fetched_at": entry["fetched_at"],
         "word_count": len(content.split()),
     }
+    if "fetched_via" in entry:  # absent from caches written before this field
+        record["fetched_via"] = entry["fetched_via"]
     if "image_only_pdf" in entry:
         record["image_only_pdf"] = entry["image_only_pdf"]
         record["pdf_path"] = entry.get("pdf_path")
@@ -290,13 +292,17 @@ def _cached_record(cache_dir: Path, url: str, ttl_days: int) -> dict | None:
     return _record(cached, cache_hit=True)
 
 
-def _store(cache_dir: Path, url: str, result: FetchResult) -> dict:
-    """Cache the full text (and PDF fields) and return the output record."""
+def _store(cache_dir: Path, url: str, result: FetchResult, attempts: list[dict]) -> dict:
+    """Cache the full text (and PDF fields) and return the output record.
+
+    fetched_via is the fetcher of the attempt that succeeded (e.g. "direct" for a
+    PDF whose fetch_method is "pdf-local")."""
     entry = {
         "url": url,
         "title": result.title,
         "content": result.content,
         "fetch_method": result.method,
+        "fetched_via": next(a["method"] for a in reversed(attempts) if a["verdict"] == "ok"),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
     if result.is_pdf:
@@ -362,7 +368,7 @@ def process_urls(
     pending = []
     for url, (result, attempts) in zip(misses, _run_first_pass(misses, jina_api_key, cache_dir, fetch_delay, workers)):
         if result.verdict.ok:
-            fetched.append(_store(cache_dir, url, result))
+            fetched.append(_store(cache_dir, url, result, attempts))
         else:
             pending.append((url, result, attempts))
 
@@ -373,7 +379,7 @@ def process_urls(
             for url, first, attempts in pending:
                 result = fallback(url, first, attempts, session, cache_dir)
                 if result is not None:
-                    fetched.append(_store(cache_dir, url, result))
+                    fetched.append(_store(cache_dir, url, result, attempts))
                 elif _live_blocks(attempts) and not _has_unsafe(attempts):
                     needs_browser.append({"url": url, "reason": _block_reason(attempts), "attempts": attempts})
                 else:
@@ -397,6 +403,7 @@ def add_browser_fetch(results_path: Path, url: str, title: str, content: str, ca
         "title": title,
         "content": content,
         "fetch_method": "browser",
+        "fetched_via": "browser",
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
     save_cache(cache_dir, url_cache_key(url), entry)
