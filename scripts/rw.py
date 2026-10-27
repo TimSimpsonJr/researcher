@@ -339,12 +339,15 @@ def cmd_apply_hop_decision(args):
     _out({"topic": args.topic, "decision": decision})
 
 
-def _confidence_sources(data) -> list[dict]:
+def _confidence_sources(data, topic=None) -> list[dict]:
     """A bare sources list, or a fetch_results file ({"fetched": [...]}).
 
     From fetch_results, use the fetched entries not marked usable: false, with
     tier / is_primary / credibility_score copied from the matching
     search_context.selected_urls entry (fetched entries don't carry them).
+    With topic, keep only entries whose selected_urls entry is stamped with that
+    topic (a hop's fetch_results is shared by every active topic); if no entry
+    carries a topic stamp, warn and keep them all.
     """
     if isinstance(data, list):
         return data
@@ -357,9 +360,15 @@ def _confidence_sources(data) -> list[dict]:
     if data["fetched"] and not selected:
         print("warning: fetch_results has no search_context.selected_urls; "
               "sources are scored without tier/primary signals", file=sys.stderr)
+    if topic is not None and not any("topic" in s for s in selected.values()):
+        print("warning: --topic given but selected_urls has no topic stamps; "
+              "counting every source in the file", file=sys.stderr)
+        topic = None
     sources = []
     for entry in data.get("fetched", []):
         if entry.get("usable") is False:
+            continue
+        if topic is not None and selected.get(entry["url"], {}).get("topic") != topic:
             continue
         signals = {k: v for k, v in selected.get(entry["url"], {}).items()
                    if k in ("tier", "is_primary", "credibility_score")}
@@ -369,7 +378,7 @@ def _confidence_sources(data) -> list[dict]:
 
 def cmd_compute_confidence(args):
     files = args.sources_file
-    sources = [s for path in files for s in _confidence_sources(_read_json(path))]
+    sources = [s for path in files for s in _confidence_sources(_read_json(path), args.topic)]
     if len(files) > 1:  # multi-hop: one source per URL, later file wins
         sources = list({s.get("url", id(s)): s for s in sources}.values())
     _out(compute_confidence(sources, depth=args.depth))
@@ -604,6 +613,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sources-file", required=True, action="append",
                    help="repeatable; with several files sources are merged by URL, later file wins")
     p.add_argument("--depth", required=True, choices=["quick", "standard", "deep", "exhaustive"])
+    p.add_argument("--topic", help="count only fetch_results sources whose selected_urls entry has this topic")
     add("quality-gate", cmd_quality_gate, "Stage 5a per-topic pass/fail and worst confidence")
     p = add("mark-superseded", cmd_mark_superseded, "retire a topic; the quality gate skips it")
     p.add_argument("--topic", required=True)

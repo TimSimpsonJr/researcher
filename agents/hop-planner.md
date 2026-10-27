@@ -45,10 +45,10 @@ You will receive:
 In batch mode skip this step: the workflow computes confidence itself and `sources_so_far` is an array, not a file. Otherwise call the confidence formula on `sources_so_far`. The orchestrator substitutes the `{repo}`, `{sources_so_far}`, and `{depth}` placeholders before dispatching the prompt — treat them as filled in by the time you run this:
 
 ```bash
-uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" compute-confidence --sources-file "{sources_so_far}" --depth {depth}
+uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" compute-confidence --sources-file "{sources_so_far}" --depth {depth} --topic "{topic}"
 ```
 
-When `sources_so_far` lists several `fetch_results_hop{N}.json` files, repeat `--sources-file "<path>"` once per file in that same command; sources are merged by URL.
+When `sources_so_far` lists several `fetch_results_hop{N}.json` files, repeat `--sources-file "<path>"` once per file in that same command; sources are merged by URL. `--topic` keeps only the sources stamped with this topic (the hop files are shared by every active topic); if the files carry no topic stamps it warns and counts everything.
 
 Record the resulting score.
 

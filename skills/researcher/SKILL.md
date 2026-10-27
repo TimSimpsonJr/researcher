@@ -462,7 +462,7 @@ Run once per pattern id.
 
 Batch dispatches at <=5 topics per round.
 
-After dispatch, collect all `selected_urls` arrays from the search agent responses (and merge SearXNG results when `SEARXNG_AVAILABLE`, deduplicating by URL). Build a per-hop `search_context_hop{N}.json` file in `STATE_DIR/` keyed off active topics for this iteration.
+After dispatch, collect all `selected_urls` arrays from the search agent responses (and merge SearXNG results when `SEARXNG_AVAILABLE`, deduplicating by URL). Build a per-hop `search_context_hop{N}.json` file in `STATE_DIR/` keyed off active topics for this iteration. Stamp every `selected_urls` entry with the `topic` string of the search agent response it came from (`{"url": ..., "tier": ..., "topic": "<topic>"}`); `fetch_results_hop{N}.json` is shared by all active topics, and `compute-confidence --topic` uses that stamp to count only the topic's own sources. When two topics select the same URL, keep the first topic's entry.
 
 ### 4b. Fetch
 

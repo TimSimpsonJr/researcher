@@ -626,6 +626,52 @@ def test_compute_confidence_accepts_fetch_results(tmp_path, cli, monkeypatch):
     assert code == 0 and out == pytest.approx(expected)
 
 
+def _two_topic_results():
+    return {
+        "search_context": {"selected_urls": [
+            {"url": "a", "tier": "T1", "is_primary": True, "topic": "Alpha"},
+            {"url": "b", "tier": "T2", "topic": "Alpha"},
+            {"url": "c", "tier": "T4", "topic": "Beta"},
+        ]},
+        "fetched": [{"url": "a", "content": "x"}, {"url": "b", "content": "y"}, {"url": "c", "content": "z"}],
+    }
+
+
+def test_compute_confidence_topic_counts_only_its_own_sources(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    path = _write(tmp_path / "fr.json", _two_topic_results())
+    monkeypatch.chdir(tmp_path)
+    code, alpha, _ = cli("compute-confidence", "--sources-file", path, "--depth", "quick", "--topic", "Alpha")
+    assert code == 0 and alpha == pytest.approx(
+        compute_confidence([{"tier": "T1", "is_primary": True}, {"tier": "T2"}], depth="quick"))
+    code, beta, _ = cli("compute-confidence", "--sources-file", path, "--depth", "quick", "--topic", "Beta")
+    assert code == 0 and beta == pytest.approx(compute_confidence([{"tier": "T4"}], depth="quick"))
+
+
+def test_compute_confidence_without_topic_counts_everything(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    monkeypatch.chdir(tmp_path)
+    code, out, _ = cli("compute-confidence", "--sources-file", _write(tmp_path / "fr.json", _two_topic_results()),
+                       "--depth", "quick")
+    expected = compute_confidence([{"tier": "T1", "is_primary": True}, {"tier": "T2"}, {"tier": "T4"}],
+                                  depth="quick")
+    assert code == 0 and out == pytest.approx(expected)
+
+
+def test_compute_confidence_topic_without_stamps_warns_and_uses_all(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    data = _two_topic_results()
+    for s in data["search_context"]["selected_urls"]:
+        del s["topic"]
+    monkeypatch.chdir(tmp_path)
+    code, out, err = cli("compute-confidence", "--sources-file", _write(tmp_path / "fr.json", data),
+                         "--depth", "quick", "--topic", "Alpha")
+    expected = compute_confidence([{"tier": "T1", "is_primary": True}, {"tier": "T2"}, {"tier": "T4"}],
+                                  depth="quick")
+    assert code == 0 and out == pytest.approx(expected)
+    assert "no topic stamps" in err
+
+
 # --- quality gate, aggregation, write ---------------------------------------
 
 def test_topic_passes_boundaries():
