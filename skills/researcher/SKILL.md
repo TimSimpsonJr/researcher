@@ -472,6 +472,46 @@ Run `fetch_and_clean.py` once for all active topics' selected URLs at this hop:
 uv run --frozen --project "REPO" "REPO/scripts/fetch_and_clean.py" --input "STATE_DIR/search_context_hop{N}.json" --output "STATE_DIR/fetch_results_hop{N}.json"
 ```
 
+**Browser pass.** `fetch_results_hop{N}.json` has a `needs_browser` list (and `stats.needs_browser`): `{url, reason, attempts}` entries the scripted fetchers could not get past (bot walls, 403s on government PDFs). It never holds unsafe or private-network URLs; those are in `failed`. If it is empty, skip to the `seen_urls` step below. Otherwise read each entry yourself, before moving on:
+
+- **Browser pane tools available** (`mcp__Claude_Browser__navigate`, `mcp__Claude_Browser__get_page_text`, `mcp__Claude_Browser__javascript_tool`):
+  - **HTML page:** `mcp__Claude_Browser__navigate` to the URL, then `mcp__Claude_Browser__get_page_text`. A passive "checking your browser" page may clear by itself; wait a few seconds and read again.
+  - **PDF** (the URL ends in `.pdf`, or the page shows a PDF viewer): first `mcp__Claude_Browser__navigate` to a public page on the PDF's own site, then run the pdf.js script below with `mcp__Claude_Browser__javascript_tool`, with `PDF_URL` replaced. It fetches the file in-page with the browser's cookies and returns the text of every page.
+  - If the page still shows a CAPTCHA or an interactive "verify you are human" check, do not click it or try to solve it. Record the URL as manual (below) and move on.
+  - Otherwise pass the text you read straight to the Write tool as `STATE_DIR/browser_hop{N}_{index}.md` (do not quote or echo it elsewhere; it stays out of your context that way) and record it (TOPIC is the topic whose selected URLs held this URL):
+
+    ```bash
+    uv run --frozen --project "REPO" "REPO/scripts/rw.py" add-browser-fetch --vault "VAULT" --hop N --topic "TOPIC" --url "URL" --title "TITLE" --content-file "STATE_DIR/browser_hop{N}_{index}.md"
+    ```
+
+    It appends the page to `fetch_results_hop{N}.json` (`fetch_method: "browser"`), removes it from `needs_browser`, caches it and adds it to the topic's `seen_urls`.
+- **No browser tools** (plain CLI, or a batch workflow): record every `needs_browser` entry as manual.
+
+Recording a manual URL (REASON is the entry's `reason`, or `captcha`):
+
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" add-manual-url --vault "VAULT" --url "URL" --reason "REASON" --topic "TOPIC"
+```
+
+Stage 10b lists them for the user. Never change the browser's user agent, use stealth tricks, or use a CAPTCHA-solving service.
+
+The pdf.js script for `mcp__Claude_Browser__javascript_tool` (pdf.js 4.0.379, worker `pdf.worker.min.mjs`):
+
+```js
+const pdfjs = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs');
+pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
+const buf = await (await fetch('PDF_URL', { credentials: 'include' })).arrayBuffer();
+const doc = await pdfjs.getDocument({ data: buf }).promise;
+const pages = [];
+for (let i = 1; i <= doc.numPages; i++) {
+  const content = await (await doc.getPage(i)).getTextContent();
+  pages.push(content.items.map((item) => item.str).join(' '));
+}
+pages.join('\n\n');
+```
+
+If the script returns little or no text, the PDF is a scan: navigate to the PDF itself and read it from the screen, or record it as manual.
+
 Update each topic's `seen_urls` with the URLs that were successfully fetched, using the `add_seen_urls` state helper. For each topic, pass the list of URLs that ended up in `fetch_results_hop{N}.fetched` (i.e., the URLs that actually returned content, not the failed ones):
 
 ```bash
@@ -480,7 +520,7 @@ uv run --frozen --project "REPO" "REPO/scripts/rw.py" add-seen-urls --topic "TOP
 
 The helper dedupes — calling it again with overlapping URLs (e.g., the same URL appears in multiple hops) is safe.
 
-**If `fetched` is empty and `failed` is non-empty:** treat the hop as a failure for the affected topic(s). The hop-planner in 4e will see zero new sources and decide accordingly. If ALL topics had zero successful fetches, abandon the run and stop (no fetched content means downstream stages have nothing to work with).
+**If `fetched` is empty and `failed` is non-empty:** evaluate this after the browser pass, so URLs recovered by the browser (now in `fetched`) count as successes; `needs_browser` URLs that were not recovered count as failures. Treat the hop as a failure for the affected topic(s). The hop-planner in 4e will see zero new sources and decide accordingly. If ALL topics had zero successful fetches, abandon the run and stop (no fetched content means downstream stages have nothing to work with).
 
 ### 4c. Media
 
@@ -501,12 +541,14 @@ Run `summarize.py` over the hop's fetch_results. Write to `summaries_hop{N}.json
 uv run --frozen --project "REPO" "REPO/scripts/summarize.py" --input "STATE_DIR/fetch_results_hop{N}.json" --model "RECOMMENDED_MODEL" --output "STATE_DIR/summaries_hop{N}.json"
 ```
 
+Items that come back `usable: false` with reason `needs visual read` are image-only PDFs with almost no text (the fetch entry has `image_only_pdf: true` and a `pdf_path`). For each, dispatch a Haiku subagent with the base-tier prompt below plus the image-only rule, and replace the item in `summaries_hop{N}.json` with its summary. Image-only PDFs that do carry text are summarized normally and keep `image_only_pdf` / `pdf_path`.
+
 **If Ollama is NOT available (base tier):**
 ```bash
 uv run --frozen --project "REPO" "REPO/scripts/summarize.py" --input "STATE_DIR/fetch_results_hop{N}.json" --prepare-for-claude --output-dir "STATE_DIR/summaries_hop{N}/"
 ```
 
-Then dispatch a Haiku subagent per article file (same prompt as v2 base-tier path), collect into `summaries_hop{N}.json` with shape `{"topic": "{project name}", "items": [...]}`. Leave each summary's `media_refs` empty -- media assets are already inlined into the rewritten article content as Obsidian embeds during Stage 4c, so the write stage picks them up directly from the per-hop fetch_results without needing a separate manifest.
+Then dispatch a Haiku subagent per article file (same prompt as v2 base-tier path, plus this image-only rule: when the file has an `Image-only PDF:` line, i.e. the fetch entry has `image_only_pdf: true`, Read the PDF at its `pdf_path` with the Read tool, up to 20 pages per call, and summarize from the page images), collect into `summaries_hop{N}.json` with shape `{"topic": "{project name}", "items": [...]}`. Leave each summary's `media_refs` empty -- media assets are already inlined into the rewritten article content as Obsidian embeds during Stage 4c, so the write stage picks them up directly from the per-hop fetch_results without needing a separate manifest.
 
 ### 4e. Hop-planner (parallel per-topic)
 
@@ -691,6 +733,8 @@ uv run --frozen --project "REPO" "REPO/scripts/rw.py" update-stage --stage class
 ```
 
 ### 6a. Aggregate per-hop summaries
+
+Before aggregating, drop from every `summaries_hop{N}.json` any item still `usable: false` with reason `needs visual read` (the visual read in Stage 4d never replaced it).
 
 Before dispatching the classify agent, aggregate all per-hop summary files into a single `summaries.json`:
 
@@ -1119,6 +1163,13 @@ Estimated cost: ${estimated_cost:.2f}
 
 {if low_confidence:}
 ⚠ Low confidence run (score {final_confidence_score}). Notes marked with low-confidence callouts.
+{end}
+
+{if final.manual_urls:}
+Needs a manual read ({count}): pages behind a CAPTCHA, or read with no browser available.
+{for each in final.manual_urls:}
+  - {url} ({reason})
+{end}
 {end}
 
 {if threads approved:}

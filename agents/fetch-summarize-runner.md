@@ -65,8 +65,9 @@ slug keeps parallel runners from colliding). Always quote paths.
 ```bash
 uv run --frozen --project "R" "R/scripts/fetch_and_clean.py" --input "W/search_context.json" --output "W/fetch_results.json"
 ```
-Read `W/fetch_results.json`. It has `{ "fetched": [{url, title, content, ...}], "failed": [...] }`.
-If `fetched` is empty, return `{ "items": [] }` and stop.
+Read `W/fetch_results.json`. It has `{ "fetched": [{url, title, content, ...}], "failed": [...], "needs_browser": [{url, reason, attempts}] }`.
+You have no browser: copy every `needs_browser` entry into your output's `manual_urls` as `{url, reason}`.
+If `fetched` is empty, return `{ "items": [], "manual_urls": [...] }` and stop.
 
 **3. Summarize.** Two paths, keyed off the tier (same as SKILL Stage 4d):
 
@@ -75,7 +76,9 @@ If `fetched` is empty, return `{ "items": [] }` and stop.
   uv run --frozen --project "R" "R/scripts/summarize.py" --input "W/fetch_results.json" --model "<config.ollama_model>" --output "W/summaries.json"
   ```
   Read `W/summaries.json`; its `items` already carry `summary`, `source_type`,
-  `key_entities`, `key_claims`.
+  `key_entities`, `key_claims`. Items with `usable: false` and reason
+  `needs visual read` are image-only PDFs: summarize each yourself with the
+  image-only rule below and replace the item.
 
 - **Base tier** (no Ollama):
   ```bash
@@ -84,6 +87,10 @@ If `fetched` is empty, return `{ "items": [] }` and stop.
   Read each prepared article file in `W/summaries/` and summarize it **yourself**
   into `{ summary, source_type, key_entities, key_claims }`: a 3–6 sentence
   factual summary, the source type, the named entities, and the notable claims.
+
+- **Image-only rule (both paths):** when a fetched entry has `image_only_pdf: true`
+  (its prepared file has an `Image-only PDF:` line), Read the PDF at its `pdf_path`
+  with the Read tool, up to 20 pages per call, and summarize from the page images.
 
 **4. Assemble.** For each summarized article, produce one item and **copy the
 credibility signals from the matching `selected_urls` entry (match by `url`)**:
@@ -113,7 +120,8 @@ A single JSON object matching the SUMMARIES schema. First char `{`, last char `}
       "credibility_score": 0.95,
       "fetch_status": "ok"
     }
-  ]
+  ],
+  "manual_urls": []
 }
 ```
 
@@ -121,4 +129,5 @@ A single JSON object matching the SUMMARIES schema. First char `{`, last char `}
 - `items` is empty `[]` when nothing fetched — that is a valid result, not an error.
 - `tier` / `is_primary` / `credibility_score` come from the input `selected_urls`,
   matched by `url` — they are what the workflow's confidence math reads.
+- `manual_urls` lists `{url, reason}` for every `needs_browser` entry; `[]` when none.
 - Never invent sources: only summarize URLs that actually fetched content.

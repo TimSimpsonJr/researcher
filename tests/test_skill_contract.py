@@ -181,3 +181,62 @@ def test_every_rw_subcommand_referenced_exists():
             used.setdefault(name, _rel(path))
     assert used, "expected rw.py calls in skills/agents"
     assert {n: f for n, f in used.items() if n not in known} == {}
+
+
+_SETUP_MD = _REPO / "skills" / "researcher-setup" / "SKILL.md"
+_RUNNER_MD = _REPO / "agents" / "fetch-summarize-runner.md"
+_INSTALL = ('PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" '
+            'uv run --frozen --project "REPO" playwright install chromium')
+
+
+def _section(text: str, start: str, end: str) -> str:
+    i = text.index(start)
+    return text[i:text.index(end, i)]
+
+
+def test_scanner_accepts_env_prefix_but_still_rejects_bad_lines():
+    assert _unfrozen_uv_hits(_INSTALL) == []
+    assert _bare_python_hits(_INSTALL) == []
+    assert _unfrozen_uv_hits(_INSTALL.replace("--frozen ", "")) != []
+    assert _unfrozen_uv_hits('PLAYWRIGHT_BROWSERS_PATH="R" uv sync --project "R"') != []
+    assert _bare_python_hits('PLAYWRIGHT_BROWSERS_PATH="R" python -c "x"') != []
+    assert _bare_python_hits('PLAYWRIGHT_BROWSERS_PATH="R" python tool.py') != []
+    assert _rw_names(
+        'PLAYWRIGHT_BROWSERS_PATH="R" uv run --frozen --project "R" "R/scripts/rw.py" bogus-cmd'
+    ) == ["bogus-cmd"]
+
+
+def test_stage_4b_browser_pass_routes_needs_browser():
+    s = _section(_SKILL_MD.read_text(encoding="utf-8"), "### 4b. Fetch", "### 4c. Media")
+    for needle in (
+        "needs_browser", "add-browser-fetch", "add-manual-url", "CAPTCHA",
+        "mcp__Claude_Browser__navigate", "mcp__Claude_Browser__get_page_text",
+        "mcp__Claude_Browser__javascript_tool",
+        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs",
+        "pdf.worker.min.mjs", "after the browser pass",
+    ):
+        assert needle in s, needle
+
+
+def test_stage_4d_and_runner_read_image_only_pdfs():
+    s = _section(_SKILL_MD.read_text(encoding="utf-8"), "### 4d. Summarize", "### 4e.")
+    assert "image_only_pdf" in s and "pdf_path" in s and "needs visual read" in s
+    runner = _RUNNER_MD.read_text(encoding="utf-8")
+    assert "image_only_pdf" in runner and "pdf_path" in runner and "needs_browser" in runner
+
+
+def test_stage_6a_drops_unread_visual_items():
+    s = _section(_SKILL_MD.read_text(encoding="utf-8"), "### 6a. Aggregate", "### 6b.")
+    assert "needs visual read" in s and "usable" in s
+
+
+def test_stage_10b_lists_manual_urls():
+    s = _section(_SKILL_MD.read_text(encoding="utf-8"), "### 10b. Print summary", "### 10c.")
+    assert "manual_urls" in s
+
+
+def test_setup_installs_chromium_and_checks_tesseract():
+    setup = _SETUP_MD.read_text(encoding="utf-8")
+    assert _INSTALL in setup
+    assert 'rw.py" check playwright' in setup and 'rw.py" check tesseract' in setup
+    assert "winget install UB-Mannheim.TesseractOCR" in setup
