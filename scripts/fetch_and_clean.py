@@ -17,18 +17,16 @@ import argparse
 import hashlib
 import json
 import os
-import socket
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
-from ipaddress import ip_address
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 
 from fetch_playwright import fetch_via_playwright
+from url_safety import UnsafeURLError, validate_url  # noqa: F401 (validate_url re-exported)
 
 # ──────────────────────────────────────────────
 # Constants
@@ -41,45 +39,6 @@ MAX_CONTENT_CHARS = 50_000
 MIN_USEFUL_CONTENT_CHARS = 200  # below this, content is likely empty/blocked
 JINA_BASE_URL = "https://r.jina.ai"
 WAYBACK_API = "https://archive.org/wayback/available"
-
-# Private/reserved IP ranges that should never be fetched
-_BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain"}
-
-
-# ──────────────────────────────────────────────
-# URL helpers
-# ──────────────────────────────────────────────
-
-def validate_url(url: str) -> None:
-    """Reject URLs targeting private/internal networks (SSRF protection).
-
-    Raises ValueError if the URL scheme is not http/https or resolves to
-    a private, loopback, reserved, or link-local IP address.
-    """
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise ValueError(f"Blocked URL scheme '{parsed.scheme}': {url}")
-
-    hostname = parsed.hostname or ""
-    if hostname in _BLOCKED_HOSTNAMES:
-        raise ValueError(f"Blocked hostname '{hostname}': {url}")
-
-    try:
-        addr = ip_address(hostname)
-        if addr.is_private or addr.is_loopback or addr.is_reserved or addr.is_link_local:
-            raise ValueError(f"Blocked private/reserved IP '{hostname}': {url}")
-    except ValueError as orig:
-        # hostname is not an IP literal — resolve it
-        if "Blocked" in str(orig):
-            raise
-        try:
-            resolved = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-            for family, _type, _proto, _canon, sockaddr in resolved:
-                addr = ip_address(sockaddr[0])
-                if addr.is_private or addr.is_loopback or addr.is_reserved or addr.is_link_local:
-                    raise ValueError(f"Blocked: '{hostname}' resolves to private IP {addr}: {url}")
-        except socket.gaierror:
-            pass  # Let the actual fetch handle DNS failures
 
 
 def url_cache_key(url: str) -> str:

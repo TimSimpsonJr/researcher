@@ -434,3 +434,11 @@ def test_validate_url_blocks_dns_to_private(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     with pytest.raises(ValueError, match="resolves to private IP"):
         validate_url("http://evil.example.com/steal")
+
+
+def test_validate_url_raises_unsafe_url_error():
+    from url_safety import UnsafeURLError
+    from fetch_and_clean import validate_url
+    with pytest.raises(UnsafeURLError):
+        validate_url("http://localhost/admin")
+    assert issubclass(UnsafeURLError, ValueError)

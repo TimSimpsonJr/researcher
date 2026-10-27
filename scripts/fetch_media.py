@@ -26,7 +26,7 @@ from urllib.parse import urlparse, unquote, parse_qs
 
 import requests
 
-from fetch_and_clean import validate_url
+from url_safety import validate_url
 
 # ──────────────────────────────────────────────
 # Constants
