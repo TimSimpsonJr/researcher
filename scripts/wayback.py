@@ -1,7 +1,7 @@
 """wayback.py — Gentle Wayback Machine client.
 
 A process-wide limiter keeps one request in flight with a MIN_GAP_S minimum
-gap, and 429/503 replies back off exponentially (honouring a numeric
+gap (per process: parallel batch runners each have their own), and 429/503 replies back off exponentially (honouring a numeric
 Retry-After) for at most MAX_TRIES tries. Snapshot lookup goes through the CDX
 API (latest statuscode:200 capture); the copy is fetched raw from
 web.archive.org/web/<ts>id_/<url>, with no Jina hop. HTML is reduced with

@@ -52,7 +52,7 @@ MARKERS = [
 
 @dataclass(frozen=True)
 class Verdict:
-    kind: str  # "ok" | "blocked" | "missing" | "thin" ("unsafe" from fetch_and_clean)
+    kind: str  # "ok" | "blocked" | "missing" | "thin" ("unsafe" and "skipped" from fetch_and_clean)
     reason: str = ""
 
     @property

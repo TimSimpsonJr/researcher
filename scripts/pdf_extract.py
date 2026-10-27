@@ -85,6 +85,7 @@ def extract(pdf_bytes: bytes, cache_dir: Path) -> tuple[str, PdfInfo]:
     still_empty = sum(1 for t in texts if _is_empty(t))
     info = PdfInfo(method=method, pages=len(texts), empty_pages=still_empty, title=title)
     if ocr_failed or capped or (texts and still_empty * 2 > len(texts)):
+        # ponytail: .cache/fetch/pdf has no TTL or cleanup yet; prune by hand or add an age sweep if it grows
         path = Path(cache_dir) / "pdf" / f"{hashlib.sha256(pdf_bytes).hexdigest()}.pdf"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(pdf_bytes)

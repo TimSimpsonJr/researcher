@@ -63,6 +63,8 @@ class BrowserSession:
         self._playwright = None
         self._context = None
         self._tmp_profile = None
+        # ponytail: per-host cache; DNS rebinding can defeat it because Chromium re-resolves
+        # each request. Acceptable for a single-user tool; drop the cache to re-check every request.
         self._host_ok: dict[tuple[str, str], bool] = {}
         self._last_nav_url: dict[str, str] = {}
         self._goto_target: str | None = None  # URL of the goto() in flight (one page at a time)
