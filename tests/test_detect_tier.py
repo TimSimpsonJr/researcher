@@ -137,7 +137,7 @@ def test_playwright_check_uses_the_repo_browser_cache(monkeypatch, tmp_path):
     from detect_tier import check_playwright
     _fake_playwright(monkeypatch, tmp_path / "chrome.exe")
     monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
-    monkeypatch.setattr(detect_tier, "_headless_shell", lambda: None)
+    monkeypatch.setattr(detect_tier, "_headless_shell", lambda exe: None)
     result = check_playwright()
     assert os.environ["PLAYWRIGHT_BROWSERS_PATH"].replace("\\", "/").endswith(".cache/ms-playwright")
     assert "PLAYWRIGHT_BROWSERS_PATH=" in result["install"] and ".cache/ms-playwright" in result["install"]
@@ -168,7 +168,7 @@ def test_playwright_ok_with_only_the_headless_shell(monkeypatch, tmp_path):
     shell.mkdir(parents=True)
     exe = shell / "chrome-headless-shell.exe"
     exe.write_bytes(b"")
-    _fake_playwright(monkeypatch, tmp_path / "missing" / "chrome.exe")
+    _fake_playwright(monkeypatch, tmp_path / "browsers" / "chromium-1243" / "chrome-win64" / "chrome.exe")
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
     result = check_playwright()
     assert result["status"] == "ok" and Path(result["executable"]) == exe
@@ -177,7 +177,17 @@ def test_playwright_ok_with_only_the_headless_shell(monkeypatch, tmp_path):
 def test_playwright_missing_when_shell_dir_has_no_executable(monkeypatch, tmp_path):
     from detect_tier import check_playwright
     (tmp_path / "browsers" / "chromium_headless_shell-1243").mkdir(parents=True)
-    _fake_playwright(monkeypatch, tmp_path / "missing" / "chrome.exe")
+    _fake_playwright(monkeypatch, tmp_path / "browsers" / "chromium-1243" / "chrome-win64" / "chrome.exe")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+    assert check_playwright()["status"] == "missing"
+
+
+def test_playwright_stale_headless_shell_revision_is_missing(monkeypatch, tmp_path):
+    from detect_tier import check_playwright
+    stale = tmp_path / "browsers" / "chromium_headless_shell-1100" / "chrome-headless-shell-win64"
+    stale.mkdir(parents=True)
+    (stale / "chrome-headless-shell.exe").write_bytes(b"")
+    _fake_playwright(monkeypatch, tmp_path / "browsers" / "chromium-1243" / "chrome-win64" / "chrome.exe")
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
     assert check_playwright()["status"] == "missing"
 

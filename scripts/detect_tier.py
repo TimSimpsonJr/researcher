@@ -5,7 +5,6 @@ Checks for Ollama, SearXNG, yt-dlp, Whisper. Provides hardware-aware
 model recommendations for Ollama.
 """
 
-import os
 import shutil
 import subprocess
 import platform
@@ -97,19 +96,18 @@ PLAYWRIGHT_INSTALL = ('PLAYWRIGHT_BROWSERS_PATH="<plugin root>/.cache/ms-playwri
 TESSERACT_INSTALL = "winget install UB-Mannheim.TesseractOCR"
 
 
-def _headless_shell() -> Path | None:
-    """The chromium headless shell BrowserSession launches (headless=True), if downloaded."""
-    base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-    if not base:
-        return None
-    for exe in sorted(Path(base).glob("chromium_headless_shell-*/*/chrome-headless-shell*")):
+def _headless_shell(chromium_exe: Path) -> Path | None:
+    """The headless shell for the same Chromium revision Playwright expects."""
+    rev_dir = chromium_exe.parent.parent  # .../chromium-1243
+    shell_dir = rev_dir.with_name(rev_dir.name.replace("chromium-", "chromium_headless_shell-", 1))
+    for exe in sorted(shell_dir.glob("*/chrome-headless-shell*")):
         if exe.is_file():
             return exe
     return None
 
 
 def check_playwright() -> dict:
-    """Playwright importable AND its Chromium build downloaded.
+    """Playwright importable AND Chromium or its headless shell downloaded.
 
     Sets PLAYWRIGHT_BROWSERS_PATH (repo-local cache) for the process unless already set."""
     import fetch_playwright  # lazy: keeps pymupdf out of `import rw`
@@ -125,7 +123,7 @@ def check_playwright() -> dict:
     except Exception as e:
         return {"status": "error", "reason": f"playwright failed to start: {e}"}
     if not exe.exists():
-        exe = _headless_shell()
+        exe = _headless_shell(exe)
     if exe is None or not exe.exists():
         return {"status": "missing", "reason": "Chromium not downloaded", "install": PLAYWRIGHT_INSTALL}
     return {"status": "ok", "executable": str(exe)}
