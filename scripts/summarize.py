@@ -227,11 +227,23 @@ def summarize_batch(
 
     Iterates over fetch_results["fetched"], calls summarize_article for each,
     and returns a list of summary dicts with url, title, and summary fields merged.
-    Failures (None returns) are filtered out.
+    Failures (None returns) are filtered out. Image-only PDFs (image_only_pdf)
+    have no text for Ollama: they come back usable: false with reason
+    "needs visual read" and their pdf_path, for a Claude summarizer to Read.
     """
     summaries: list[dict] = []
 
     for item in fetch_results.get("fetched", []):
+        if item.get("image_only_pdf"):
+            summaries.append({
+                "url": item["url"],
+                "title": item["title"],
+                "usable": False,
+                "reason": "needs visual read",
+                "image_only_pdf": True,
+                "pdf_path": item.get("pdf_path"),
+            })
+            continue
         result = summarize_article(
             content=item["content"],
             title=item["title"],
@@ -276,21 +288,26 @@ def prepare_for_claude_code(
         filename = f"{index}-{slug}.md"
 
         truncated_content = item["content"][:MAX_CONTENT_CHARS_CLAUDE]
+        visual = (
+            f"Image-only PDF: read the page images at {item.get('pdf_path')}\n\n"
+            if item.get("image_only_pdf") else ""
+        )
 
         file_content = (
             f"# {item['title']}\n\n"
             f"Source: {item['url']}\n\n"
+            f"{visual}"
             f"---\n\n"
             f"{truncated_content}\n"
         )
 
         (output_dir / filename).write_text(file_content, encoding="utf-8")
 
-        entries.append({
-            "url": item["url"],
-            "title": item["title"],
-            "file": filename,
-        })
+        entry = {"url": item["url"], "title": item["title"], "file": filename}
+        if item.get("image_only_pdf"):
+            entry["image_only_pdf"] = True
+            entry["pdf_path"] = item.get("pdf_path")
+        entries.append(entry)
 
     return entries
 
@@ -331,14 +348,17 @@ def main() -> None:
         # classify-agent input contract and the per-hop aggregation in
         # SKILL.md Stage 6a (which globs `summaries_hop*.json` and reads
         # `data.get("items", [])`).
+        total = len(fetch_results.get("fetched", []))
+        usable = [s for s in summaries if s.get("usable", True)]
         result = {
             "mode": "ollama",
             "model": args.model,
             "items": summaries,
             "stats": {
-                "total": len(fetch_results.get("fetched", [])),
-                "summarized": len(summaries),
-                "failed": len(fetch_results.get("fetched", [])) - len(summaries),
+                "total": total,
+                "summarized": len(usable),
+                "needs_visual_read": len(summaries) - len(usable),
+                "failed": total - len(summaries),
             },
         }
 
