@@ -69,6 +69,7 @@ def _chunk_content(content: str, chunk_size: int = CHUNK_SIZE, overlap: int = CH
     return chunks
 
 
+from block_detect import MIN_USEFUL_CONTENT_CHARS
 from text_utils import slugify as _slugify
 
 
@@ -227,11 +228,24 @@ def summarize_batch(
 
     Iterates over fetch_results["fetched"], calls summarize_article for each,
     and returns a list of summary dicts with url, title, and summary fields merged.
-    Failures (None returns) are filtered out.
+    Failures (None returns) are filtered out. Image-only PDFs (image_only_pdf)
+    have no text for Ollama: they come back usable: false with reason
+    "needs visual read" and their pdf_path, for a Claude summarizer to Read.
     """
     summaries: list[dict] = []
 
     for item in fetch_results.get("fetched", []):
+        visual = bool(item.get("image_only_pdf") and item.get("pdf_path"))
+        if visual and len(item.get("content", "").strip()) < MIN_USEFUL_CONTENT_CHARS:
+            summaries.append({
+                "url": item["url"],
+                "title": item["title"],
+                "usable": False,
+                "reason": "needs visual read",
+                "image_only_pdf": True,
+                "pdf_path": item.get("pdf_path"),
+            })
+            continue
         result = summarize_article(
             content=item["content"],
             title=item["title"],
@@ -240,10 +254,12 @@ def summarize_batch(
             ollama_url=ollama_url,
         )
         if result is not None:
+            extra = {"image_only_pdf": True, "pdf_path": item["pdf_path"]} if visual else {}
             summaries.append({
                 "url": item["url"],
                 "title": item["title"],
                 **result,
+                **extra,
             })
 
     return summaries
@@ -276,21 +292,27 @@ def prepare_for_claude_code(
         filename = f"{index}-{slug}.md"
 
         truncated_content = item["content"][:MAX_CONTENT_CHARS_CLAUDE]
+        is_visual = bool(item.get("image_only_pdf") and item.get("pdf_path"))
+        visual = (
+            f"Image-only PDF: read the page images at {item['pdf_path']}\n\n"
+            if is_visual else ""
+        )
 
         file_content = (
             f"# {item['title']}\n\n"
             f"Source: {item['url']}\n\n"
+            f"{visual}"
             f"---\n\n"
             f"{truncated_content}\n"
         )
 
         (output_dir / filename).write_text(file_content, encoding="utf-8")
 
-        entries.append({
-            "url": item["url"],
-            "title": item["title"],
-            "file": filename,
-        })
+        entry = {"url": item["url"], "title": item["title"], "file": filename}
+        if is_visual:
+            entry["image_only_pdf"] = True
+            entry["pdf_path"] = item["pdf_path"]
+        entries.append(entry)
 
     return entries
 
@@ -331,14 +353,17 @@ def main() -> None:
         # classify-agent input contract and the per-hop aggregation in
         # SKILL.md Stage 6a (which globs `summaries_hop*.json` and reads
         # `data.get("items", [])`).
+        total = len(fetch_results.get("fetched", []))
+        skipped = [s for s in summaries if s.get("usable") is False]
         result = {
             "mode": "ollama",
             "model": args.model,
             "items": summaries,
             "stats": {
-                "total": len(fetch_results.get("fetched", [])),
-                "summarized": len(summaries),
-                "failed": len(fetch_results.get("fetched", [])) - len(summaries),
+                "total": total,
+                "summarized": len(summaries) - len(skipped),
+                "needs_visual_read": len(skipped),
+                "failed": total - len(summaries),
             },
         }
 

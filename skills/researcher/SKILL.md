@@ -462,7 +462,7 @@ Run once per pattern id.
 
 Batch dispatches at <=5 topics per round.
 
-After dispatch, collect all `selected_urls` arrays from the search agent responses (and merge SearXNG results when `SEARXNG_AVAILABLE`, deduplicating by URL). Build a per-hop `search_context_hop{N}.json` file in `STATE_DIR/` keyed off active topics for this iteration.
+After dispatch, collect all `selected_urls` arrays from the search agent responses (and merge SearXNG results when `SEARXNG_AVAILABLE`, deduplicating by URL). Build a per-hop `search_context_hop{N}.json` file in `STATE_DIR/` keyed off active topics for this iteration. Stamp every `selected_urls` entry with the `topic` string of the search agent response it came from (`{"url": ..., "tier": ..., "topic": "<topic>"}`); `fetch_results_hop{N}.json` is shared by all active topics, and `compute-confidence --topic` uses that stamp to count only the topic's own sources. When two topics select the same URL, keep the first topic's entry.
 
 ### 4b. Fetch
 
@@ -472,6 +472,46 @@ Run `fetch_and_clean.py` once for all active topics' selected URLs at this hop:
 uv run --frozen --project "REPO" "REPO/scripts/fetch_and_clean.py" --input "STATE_DIR/search_context_hop{N}.json" --output "STATE_DIR/fetch_results_hop{N}.json"
 ```
 
+**Browser pass.** `fetch_results_hop{N}.json` has a `needs_browser` list (and `stats.needs_browser`): `{url, reason, attempts}` entries the scripted fetchers could not get past (bot walls, 403s on government PDFs). It never holds unsafe or private-network URLs; those are in `failed`. If it is empty, skip to the `seen_urls` step below. Otherwise read each entry yourself, before moving on:
+
+- **Browser pane tools available** (`mcp__Claude_Browser__navigate`, `mcp__Claude_Browser__get_page_text`, `mcp__Claude_Browser__javascript_tool`):
+  - **HTML page:** `mcp__Claude_Browser__navigate` to the URL, then `mcp__Claude_Browser__get_page_text` with `max_chars: 50000`. A passive "checking your browser" page may clear by itself; wait a few seconds and read again.
+  - **PDF** (the URL ends in `.pdf`, or the page shows a PDF viewer): first `mcp__Claude_Browser__navigate` to a public page on the PDF's exact host (same scheme and domain as `PDF_URL`), then run the pdf.js script below with `mcp__Claude_Browser__javascript_tool`, with `PDF_URL` replaced. It fetches the file in-page with the browser's cookies and returns the text of every page.
+  - If the page still shows a CAPTCHA or an interactive "verify you are human" check, do not click it or try to solve it. Record the URL as manual (below) and move on.
+  - Otherwise pass the text you read straight to the Write tool as `STATE_DIR/browser_hop{N}_{index}.md` (copy it verbatim; do not quote, summarize or repeat it in your replies) and record it (`{index}` = the entry's position in `needs_browser`; TOPIC is the topic whose selected URLs held this URL; TITLE = the page or PDF title, or the URL if none):
+
+    ```bash
+    uv run --frozen --project "REPO" "REPO/scripts/rw.py" add-browser-fetch --vault "VAULT" --hop N --topic "TOPIC" --url "URL" --title "TITLE" --content-file "STATE_DIR/browser_hop{N}_{index}.md"
+    ```
+
+    It appends the page to `fetch_results_hop{N}.json` (`fetch_method: "browser"`), removes it from `needs_browser`, caches it and adds it to the topic's `seen_urls`.
+- **No browser tools** (plain CLI, or a batch workflow): record every `needs_browser` entry as manual.
+
+Recording a manual URL (REASON is the entry's `reason`, or `captcha`):
+
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" add-manual-url --vault "VAULT" --url "URL" --reason "REASON" --topic "TOPIC"
+```
+
+Stage 10b lists them for the user. Never change the browser's user agent, use stealth tricks, or use a CAPTCHA-solving service.
+
+The pdf.js script for `mcp__Claude_Browser__javascript_tool` (pdf.js 4.0.379, worker `pdf.worker.min.mjs`):
+
+```js
+const pdfjs = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs');
+pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
+const buf = await (await fetch('PDF_URL', { credentials: 'include' })).arrayBuffer();
+const doc = await pdfjs.getDocument({ data: buf }).promise;
+const pages = [];
+for (let i = 1; i <= doc.numPages; i++) {
+  const content = await (await doc.getPage(i)).getTextContent();
+  pages.push(content.items.map((item) => item.str).join(' '));
+}
+pages.join('\n\n').slice(0, 50000);
+```
+
+If the script throws (the site blocks the cdnjs import, the PDF is on another host, or the response is not a PDF), or returns little or no text (a scan), navigate to the PDF itself and read it with `mcp__Claude_Browser__get_page_text`; if that is empty too, record it as manual with reason `pdf_unreadable`.
+
 Update each topic's `seen_urls` with the URLs that were successfully fetched, using the `add_seen_urls` state helper. For each topic, pass the list of URLs that ended up in `fetch_results_hop{N}.fetched` (i.e., the URLs that actually returned content, not the failed ones):
 
 ```bash
@@ -480,7 +520,7 @@ uv run --frozen --project "REPO" "REPO/scripts/rw.py" add-seen-urls --topic "TOP
 
 The helper dedupes — calling it again with overlapping URLs (e.g., the same URL appears in multiple hops) is safe.
 
-**If `fetched` is empty and `failed` is non-empty:** treat the hop as a failure for the affected topic(s). The hop-planner in 4e will see zero new sources and decide accordingly. If ALL topics had zero successful fetches, abandon the run and stop (no fetched content means downstream stages have nothing to work with).
+**If `fetched` is still empty after the browser pass** (every URL ended in `failed`, or in `needs_browser` and was not recovered): treat the hop as a failure for the affected topic(s). The hop-planner in 4e will see zero new sources and decide accordingly. If ALL topics had zero successful fetches, abandon the run, print `manual_urls` from the run state (same format as Stage 10b), and stop (no fetched content means downstream stages have nothing to work with).
 
 ### 4c. Media
 
@@ -501,12 +541,14 @@ Run `summarize.py` over the hop's fetch_results. Write to `summaries_hop{N}.json
 uv run --frozen --project "REPO" "REPO/scripts/summarize.py" --input "STATE_DIR/fetch_results_hop{N}.json" --model "RECOMMENDED_MODEL" --output "STATE_DIR/summaries_hop{N}.json"
 ```
 
+Items that come back `usable: false` with reason `needs visual read` are image-only PDFs with almost no text (the fetch entry has `image_only_pdf: true` and a `pdf_path`). For each, dispatch a Haiku subagent with the base-tier prompt below plus the image-only rule, giving it the item's `url`, `title` and `pdf_path`, and replace the item in `summaries_hop{N}.json` with its summary. Image-only PDFs that do carry text are summarized normally and keep `image_only_pdf` / `pdf_path`.
+
 **If Ollama is NOT available (base tier):**
 ```bash
 uv run --frozen --project "REPO" "REPO/scripts/summarize.py" --input "STATE_DIR/fetch_results_hop{N}.json" --prepare-for-claude --output-dir "STATE_DIR/summaries_hop{N}/"
 ```
 
-Then dispatch a Haiku subagent per article file (same prompt as v2 base-tier path), collect into `summaries_hop{N}.json` with shape `{"topic": "{project name}", "items": [...]}`. Leave each summary's `media_refs` empty -- media assets are already inlined into the rewritten article content as Obsidian embeds during Stage 4c, so the write stage picks them up directly from the per-hop fetch_results without needing a separate manifest.
+Then dispatch a Haiku subagent per article file (same prompt as v2 base-tier path, plus this image-only rule: when the file has an `Image-only PDF:` line, i.e. the fetch entry has `image_only_pdf: true`, Read the PDF at its `pdf_path` with the Read tool, up to 20 pages per call, and summarize from the page images), collect into `summaries_hop{N}.json` with shape `{"topic": "{project name}", "items": [...]}`. Leave each summary's `media_refs` empty -- media assets are already inlined into the rewritten article content as Obsidian embeds during Stage 4c, so the write stage picks them up directly from the per-hop fetch_results without needing a separate manifest.
 
 ### 4e. Hop-planner (parallel per-topic)
 
@@ -523,7 +565,7 @@ current_hop: {hop_level}
 max_hops: {topic.max_hops}
 confidence_target: {topic.depth's target: quick 0.6, standard 0.7, deep 0.8, exhaustive 0.9}
 summaries_so_far: {path to all summaries this topic has collected across all hops}
-sources_so_far: {path to all sources this topic has collected}
+sources_so_far: {every fetch_results_hop{N}.json path for this topic, one per hop; hop-planner passes each to compute-confidence as a repeated --sources-file}
 hop_genealogy: {topic.hop_genealogy as JSON}
 seen_urls: {topic.seen_urls}
 vault_index_path: {VAULT}/.researcher/vault_index.db
@@ -574,11 +616,19 @@ Each topic has its own depth and therefore its own `confidence_target` (quick 0.
 uv run --frozen --project "REPO" "REPO/scripts/rw.py" quality-gate
 ```
 
-It prints `{passed, failing_topics, topics, worst_confidence, replan_count}`. A topic passes when its latest confidence (0.0 if it has none) is at least its depth's `confidence_target` and its `contradiction_rate` is at most 0.3. `failing_topics` lists those that don't, each with `topic`, `depth`, `confidence`, `contradiction_rate` and `replan_hint`.
+It prints `{passed, failing_topics, topics, superseded, worst_confidence, replan_count}`. A topic passes when its latest confidence (0.0 if it has none) is at least its depth's `confidence_target` and its `contradiction_rate` is at most 0.3. `failing_topics` lists those that don't, each with `topic`, `depth`, `confidence`, `contradiction_rate` and `replan_hint`.
 
 If `failing_topics` is empty: proceed to Stage 6 (classify).
 
-For diagnostic display and the low-confidence note marker, `quality-gate` also returns `worst_confidence`: the lowest latest confidence across all topics (0.0 if none).
+A topic another one replaced (for example, merged into a sibling after a replan) can be retired instead of failing the gate:
+
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" mark-superseded --topic "TOPIC" --reason "REASON"
+```
+
+`quality-gate` then leaves it out of `topics` and `failing_topics` and lists it under `superseded`.
+
+For diagnostic display and the low-confidence note marker, `quality-gate` also returns `worst_confidence`: the lowest latest confidence across all non-superseded topics (0.0 if none).
 
 This is the value used downstream as `OVERALL_CONFIDENCE` in Stage 5c's user-decision payload and 5d's `final_confidence_score`. There is no single "run target" because depths are per-topic, but the worst-topic confidence is the meaningful number to surface in user prompts and frontmatter callouts.
 
@@ -683,6 +733,12 @@ uv run --frozen --project "REPO" "REPO/scripts/rw.py" update-stage --stage class
 ```
 
 ### 6a. Aggregate per-hop summaries
+
+Before aggregating, drop from every `summaries_hop{N}.json` any item still `usable: false` with reason `needs visual read` (the visual read in Stage 4d never replaced it). Record each dropped item so Stage 10b lists it:
+
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" add-manual-url --vault "VAULT" --url "URL" --reason "needs visual read"
+```
 
 Before dispatching the classify agent, aggregate all per-hop summary files into a single `summaries.json`:
 
@@ -1113,6 +1169,13 @@ Estimated cost: ${estimated_cost:.2f}
 ⚠ Low confidence run (score {final_confidence_score}). Notes marked with low-confidence callouts.
 {end}
 
+{if final.manual_urls:}
+Needs a manual read ({count}): pages behind a CAPTCHA, or read with no browser available.
+{for each in final.manual_urls:}
+  - {url} ({reason})
+{end}
+{end}
+
 {if threads approved:}
 Threads queued for follow-up:
   - {topic} (priority: {priority})
@@ -1318,9 +1381,13 @@ The workflow's agents draw from the turn's **shared budget pool**, so a `+Nk`/bu
 
 ### 4B.3 Thread-selection gate
 
-The result is `{written_notes, updated_notes, threads, summary}`. If `summary.aborted` / `aborted:true`, report `reason` and stop. Otherwise:
+The result is `{written_notes, updated_notes, threads, manual_urls, summary}` (`manual_urls`: `{topic, url, reason}` pages the runners could not read, deduped by URL). If `summary.aborted` / `aborted:true`, report `reason`, print the "Needs a manual read" list from `manual_urls` (format below), and stop. Otherwise:
 ```
 Batch complete: {notes_written} written, {notes_updated} updated{, {N} low-confidence flagged}.
+{if manual_urls:}
+Needs a manual read ({count}): pages behind a CAPTCHA, or read with no browser available.
+  - {url} ({reason}) [{topic}]
+{end}
 Follow-up threads:
   1. {topic} (score {score}, {novelty_status}) — {rationale}
   ...
@@ -1335,6 +1402,7 @@ Record the **complete** run marker. Present:
 ```
 {project}: {notes_written} written, {notes_updated} updated, {threads_found} threads.
 {low-confidence topics flagged, if any} · {failures, if any}
+{manual_urls (url, reason), if any, so the user can read them by hand}
 Notes are in the vault.
 ```
 Done. (Stages 4–10 are the inline alternative and are not run on this path.)

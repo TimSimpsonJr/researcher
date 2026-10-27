@@ -166,6 +166,13 @@ def test_check_dispatches_by_component(cli, monkeypatch):
     assert set(cli("check", "platform")[1]) == {"os", "arch", "is_wsl"}
 
 
+def test_check_playwright_and_tesseract(cli, monkeypatch):
+    monkeypatch.setattr(rw, "check_playwright", lambda: {"status": "ok"})
+    monkeypatch.setattr(rw, "check_tesseract", lambda: {"status": "missing"})
+    assert cli("check", "playwright")[1] == {"status": "ok"}
+    assert cli("check", "tesseract")[1] == {"status": "missing"}
+
+
 def test_recommend_model(cli):
     out = cli("recommend-model", "--ram-gb", "32", "--vram-gb", "16")[1]
     assert out["model"] == "qwen2.5:14b"
@@ -415,6 +422,175 @@ def test_add_seen_urls_unknown_topic_fails(active_run, cli):
     assert code == 1 and "Topic not found" in err
 
 
+PDF_URL = "https://fdle.example/packet.pdf"
+
+
+def _needs_browser_results(vault):
+    return _write(_state(vault) / "fetch_results_hop1.json", {
+        "topic": "T", "fetched": [], "failed": [],
+        "needs_browser": [{"url": PDF_URL, "reason": "http_403", "attempts": []}],
+        "stats": {"total_urls": 1, "fetched": 0, "failed": 0, "needs_browser": 1,
+                  "cache_hits": 0, "total_words": 0},
+    })
+
+
+@pytest.fixture
+def no_dns(monkeypatch):
+    import fetch_and_clean
+    monkeypatch.setattr(fetch_and_clean, "validate_url", lambda url: None)
+
+
+def test_add_browser_fetch_moves_url_out_of_needs_browser(active_run, cli, tmp_path, no_dns):
+    import fetch_and_clean
+    results = _needs_browser_results(active_run)
+    page = active_run / "page.md"
+    page.write_text("Board package text. " * 30, encoding="utf-8")
+    cache = tmp_path / "cache"
+    code, out, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                         "--title", "Board package", "--content-file", page, "--cache-dir", cache)
+    assert code == 0, err
+    assert out == {"url": PDF_URL, "hop": "1", "word_count": 90}
+    data = json.loads(results.read_text(encoding="utf-8"))
+    assert [(f["url"], f["fetch_method"], f["title"]) for f in data["fetched"]] == [(PDF_URL, "browser", "Board package")]
+    assert data["fetched"][0]["fetched_via"] == "browser"
+    assert data["needs_browser"] == []
+    assert data["stats"] == {"total_urls": 1, "fetched": 1, "failed": 0, "needs_browser": 0,
+                             "cache_hits": 0, "total_words": 90}
+    cached = fetch_and_clean.load_cache(cache, fetch_and_clean.url_cache_key(PDF_URL))
+    assert cached["fetch_method"] == "browser" and cached["content"].startswith("Board package text.")
+    assert PDF_URL in _run_file(active_run)["topics"][0]["seen_urls"]
+
+
+def test_add_browser_fetch_also_clears_failed(active_run, cli, tmp_path, no_dns):
+    results = _needs_browser_results(active_run)
+    data = json.loads(results.read_text(encoding="utf-8"))
+    data["failed"] = [{"url": PDF_URL, "error": "x", "attempts": []}]
+    results.write_text(json.dumps(data), encoding="utf-8")
+    page = active_run / "page.md"
+    page.write_text("some text here", encoding="utf-8")
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                       "--content-file", page, "--cache-dir", tmp_path / "cache")
+    assert code == 0, err
+    data = json.loads(results.read_text(encoding="utf-8"))
+    assert data["failed"] == [] and data["stats"]["failed"] == 0 and data["stats"]["fetched"] == 1
+
+
+def test_add_browser_fetch_rejects_internal_url(active_run, cli, tmp_path):
+    results = _needs_browser_results(active_run)
+    before = results.read_text(encoding="utf-8")
+    page = active_run / "page.md"
+    page.write_text("x", encoding="utf-8")
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR",
+                       "--url", "http://10.0.0.5/admin", "--content-file", page, "--cache-dir", tmp_path / "cache")
+    assert code == 1 and err.startswith("ERROR:") and "Blocked" in err
+    assert results.read_text(encoding="utf-8") == before
+
+
+def test_add_browser_fetch_needs_the_hop_file(active_run, cli, tmp_path, no_dns):
+    page = active_run / "page.md"
+    page.write_text("x", encoding="utf-8")
+    code, _, err = cli("add-browser-fetch", "--hop", "9", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                       "--content-file", page, "--cache-dir", tmp_path / "cache")
+    assert code == 1 and "fetch_results_hop9.json not found" in err
+
+
+def _unchanged_after(active_run, cli, tmp_path, content_file, expect):
+    results = _needs_browser_results(active_run)
+    before = results.read_text(encoding="utf-8")
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                       "--content-file", content_file, "--cache-dir", tmp_path / "cache")
+    assert code == 1 and expect in err
+    assert results.read_text(encoding="utf-8") == before
+    assert _run_file(active_run)["topics"][0]["seen_urls"] == []
+    assert not (tmp_path / "cache").exists()
+
+
+def test_add_browser_fetch_missing_content_file_changes_nothing(active_run, cli, tmp_path, no_dns):
+    _unchanged_after(active_run, cli, tmp_path, active_run / "nope.md", "ERROR:")
+
+
+def test_add_browser_fetch_empty_content_file_changes_nothing(active_run, cli, tmp_path, no_dns):
+    page = active_run / "empty.md"
+    page.write_text("  \n", encoding="utf-8")
+    _unchanged_after(active_run, cli, tmp_path, page, "content file is empty")
+
+
+def test_add_browser_fetch_rejects_a_block_page(active_run, cli, tmp_path, no_dns):
+    wall = Path(__file__).parent / "fixtures" / "pages" / "cloudflare_jina.md"
+    page = active_run / "wall.md"
+    page.write_text(wall.read_text(encoding="utf-8"), encoding="utf-8")
+    _unchanged_after(active_run, cli, tmp_path, page, "content looks like a block page (cloudflare)")
+
+
+def test_add_browser_fetch_cache_failure_leaves_seen_urls_alone(active_run, cli, tmp_path, no_dns, monkeypatch):
+    import fetch_and_clean
+    results = _needs_browser_results(active_run)
+    before = results.read_text(encoding="utf-8")
+    page = active_run / "page.md"
+    page.write_text("Board package text. " * 30, encoding="utf-8")
+
+    def deny(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(fetch_and_clean, "save_cache", deny)
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                       "--content-file", page, "--cache-dir", tmp_path / "cache")
+    assert code == 1 and "disk full" in err
+    assert results.read_text(encoding="utf-8") == before
+    assert _run_file(active_run)["topics"][0]["seen_urls"] == []
+
+
+def test_add_browser_fetch_truncates_output_but_caches_full_text(active_run, cli, tmp_path, no_dns):
+    import fetch_and_clean
+    results = _needs_browser_results(active_run)
+    page = active_run / "big.md"
+    page.write_text("a" * (fetch_and_clean.MAX_CONTENT_CHARS + 500), encoding="utf-8")
+    cache = tmp_path / "cache"
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                       "--content-file", page, "--cache-dir", cache)
+    assert code == 0, err
+    data = json.loads(results.read_text(encoding="utf-8"))
+    assert len(data["fetched"][0]["content"]) == fetch_and_clean.MAX_CONTENT_CHARS
+    cached = fetch_and_clean.load_cache(cache, fetch_and_clean.url_cache_key(PDF_URL))
+    assert len(cached["content"]) == fetch_and_clean.MAX_CONTENT_CHARS + 500
+
+
+def test_add_browser_fetch_twice_keeps_one_record(active_run, cli, tmp_path, no_dns):
+    results = _needs_browser_results(active_run)
+    page = active_run / "page.md"
+    page.write_text("some text here", encoding="utf-8")
+    for _ in range(2):
+        code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                           "--content-file", page, "--cache-dir", tmp_path / "cache")
+        assert code == 0, err
+    data = json.loads(results.read_text(encoding="utf-8"))
+    assert len(data["fetched"]) == 1 and data["stats"]["fetched"] == 1
+
+
+def test_add_browser_fetch_unknown_topic_leaves_file_alone(active_run, cli, tmp_path, no_dns):
+    results = _needs_browser_results(active_run)
+    before = results.read_text(encoding="utf-8")
+    page = active_run / "page.md"
+    page.write_text("x", encoding="utf-8")
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Nope", "--url", PDF_URL,
+                       "--content-file", page, "--cache-dir", tmp_path / "cache")
+    assert code == 1 and "Topic not found" in err
+    assert results.read_text(encoding="utf-8") == before
+
+
+def test_add_manual_url_dedupes(active_run, cli):
+    code, out, _ = cli("add-manual-url", "--url", PDF_URL, "--reason", "captcha", "--topic", "Greenville ALPR")
+    assert code == 0 and out == {"url": PDF_URL, "reason": "captcha"}
+    cli("add-manual-url", "--url", PDF_URL, "--reason", "captcha")
+    assert _run_file(active_run)["manual_urls"] == [
+        {"url": PDF_URL, "reason": "captcha", "topic": "Greenville ALPR"}]
+
+
+def test_add_manual_url_without_run_fails(vault, cli):
+    code, _, err = cli("add-manual-url", "--url", PDF_URL, "--reason", "captcha")
+    assert code == 1 and "No active run" in err
+
+
 HOP_RESPONSE = {
     "topic": "Greenville ALPR",
     "decision": "continue",
@@ -456,6 +632,70 @@ def test_compute_confidence_needs_no_vault(tmp_path, cli, monkeypatch):
     code, out, _ = cli("compute-confidence", "--sources-file", _write(tmp_path / "s.json", sources),
                        "--depth", "quick")
     assert code == 0 and out == pytest.approx(compute_confidence(sources, depth="quick"))
+
+
+def test_compute_confidence_accepts_fetch_results(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    data = {
+        "search_context": {"selected_urls": [
+            {"url": "a", "tier": "T1", "is_primary": True},
+            {"url": "b", "tier": "T2"},
+            {"url": "c", "tier": "T1", "is_primary": True},
+        ]},
+        "fetched": [{"url": "a", "content": "x"}, {"url": "b", "content": "y"},
+                    {"url": "c", "content": "z", "usable": False}],
+    }
+    monkeypatch.chdir(tmp_path)
+    code, out, _ = cli("compute-confidence", "--sources-file", _write(tmp_path / "fr.json", data),
+                       "--depth", "quick")
+    expected = compute_confidence([{"tier": "T1", "is_primary": True}, {"tier": "T2"}], depth="quick")
+    assert code == 0 and out == pytest.approx(expected)
+
+
+def _two_topic_results():
+    return {
+        "search_context": {"selected_urls": [
+            {"url": "a", "tier": "T1", "is_primary": True, "topic": "Alpha"},
+            {"url": "b", "tier": "T2", "topic": "Alpha"},
+            {"url": "c", "tier": "T4", "topic": "Beta"},
+        ]},
+        "fetched": [{"url": "a", "content": "x"}, {"url": "b", "content": "y"}, {"url": "c", "content": "z"}],
+    }
+
+
+def test_compute_confidence_topic_counts_only_its_own_sources(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    path = _write(tmp_path / "fr.json", _two_topic_results())
+    monkeypatch.chdir(tmp_path)
+    code, alpha, _ = cli("compute-confidence", "--sources-file", path, "--depth", "quick", "--topic", "Alpha")
+    assert code == 0 and alpha == pytest.approx(
+        compute_confidence([{"tier": "T1", "is_primary": True}, {"tier": "T2"}], depth="quick"))
+    code, beta, _ = cli("compute-confidence", "--sources-file", path, "--depth", "quick", "--topic", "Beta")
+    assert code == 0 and beta == pytest.approx(compute_confidence([{"tier": "T4"}], depth="quick"))
+
+
+def test_compute_confidence_without_topic_counts_everything(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    monkeypatch.chdir(tmp_path)
+    code, out, _ = cli("compute-confidence", "--sources-file", _write(tmp_path / "fr.json", _two_topic_results()),
+                       "--depth", "quick")
+    expected = compute_confidence([{"tier": "T1", "is_primary": True}, {"tier": "T2"}, {"tier": "T4"}],
+                                  depth="quick")
+    assert code == 0 and out == pytest.approx(expected)
+
+
+def test_compute_confidence_topic_without_stamps_warns_and_uses_all(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    data = _two_topic_results()
+    for s in data["search_context"]["selected_urls"]:
+        del s["topic"]
+    monkeypatch.chdir(tmp_path)
+    code, out, err = cli("compute-confidence", "--sources-file", _write(tmp_path / "fr.json", data),
+                         "--depth", "quick", "--topic", "Alpha")
+    expected = compute_confidence([{"tier": "T1", "is_primary": True}, {"tier": "T2"}, {"tier": "T4"}],
+                                  depth="quick")
+    assert code == 0 and out == pytest.approx(expected)
+    assert "no topic stamps" in err
 
 
 # --- quality gate, aggregation, write ---------------------------------------
@@ -518,7 +758,8 @@ def test_aggregate_summaries(active_run, cli):
     code, out, _ = cli("aggregate-summaries", "--project", "ALPR")
     assert code == 0 and out["items"] == 2
     combined = json.loads((sd / "summaries.json").read_text(encoding="utf-8"))
-    assert combined == {"topic": "ALPR", "items": [{"url": "a"}, {"url": "b"}]}
+    assert combined == {"topic": "ALPR", "items": [
+        {"url": "a", "topic_key": None, "hop": 1}, {"url": "b", "topic_key": None, "hop": 2}]}
 
 
 def test_aggregate_fetch_results_later_hop_wins(active_run, cli):
@@ -559,6 +800,106 @@ def test_aggregate_hop_order_is_numeric(active_run, cli):
     assert json.loads((sd / "summaries.json").read_text(encoding="utf-8"))["items"][0]["v"] == 10
     agg = json.loads((sd / "fetch_results_aggregated.json").read_text(encoding="utf-8"))
     assert agg["by_url"]["u"]["content"] == "ten"
+
+
+def test_aggregate_summaries_stamps_topic_key_and_hop(active_run, cli):
+    sd = _state(active_run)
+    _write(sd / "summaries_hop2_alpr.json", {"items": [{"url": "u", "title": "A"},
+                                                       {"url": "v", "title": "B", "topic_key": "kept"}]})
+    cli("aggregate-summaries", "--project", "P")
+    items = json.loads((sd / "summaries.json").read_text(encoding="utf-8"))["items"]
+    assert [(i["topic_key"], i["hop"]) for i in items] == [("alpr", 2), ("kept", 2)]
+
+
+def test_mark_superseded_takes_topic_out_of_the_gate(active_run, cli):
+    code, out, _ = cli("mark-superseded", "--topic", "Greenville ALPR", "--reason", "merged into Flock topic")
+    assert code == 0 and out == {"topic": "Greenville ALPR", "status": "superseded"}
+    resp = _write(active_run / "resp.json", {"decision": "stop", "confidence_score": 0.95, "contradiction_rate": 0.1})
+    hop = _write(active_run / "hop.json", {"hop": 1})
+    cli("apply-hop-decision", "--topic", "Flock Safety contracts", "--response-file", resp, "--hop-data-file", hop)
+    gate = cli("quality-gate")[1]
+    assert gate["passed"] is True and gate["superseded"] == ["Greenville ALPR"]
+    assert [t["topic"] for t in gate["topics"]] == ["Flock Safety contracts"]
+    assert gate["worst_confidence"] == 0.95
+    run = _run_file(active_run)
+    assert {t["topic"]: t["status"] for t in run["topics"]}["Greenville ALPR"] == "superseded"
+    assert run["superseded"] == {"Greenville ALPR": "merged into Flock topic"}
+
+
+def test_mark_superseded_unknown_topic_fails(active_run, cli):
+    code, _, err = cli("mark-superseded", "--topic", "Nope", "--reason", "x")
+    assert code == 1 and "Topic not found" in err
+
+
+def test_mark_superseded_refuses_last_live_topic(active_run, cli):
+    assert cli("mark-superseded", "--topic", "Greenville ALPR", "--reason", "x")[0] == 0
+    code, _, err = cli("mark-superseded", "--topic", "Flock Safety contracts", "--reason", "y")
+    assert code == 1 and "cannot supersede the last live topic" in err
+
+
+def test_apply_hop_decision_refuses_superseded_topic(active_run, cli):
+    cli("mark-superseded", "--topic", "Greenville ALPR", "--reason", "x")
+    resp = _write(active_run / "resp.json", {"decision": "stop", "confidence_score": 0.9, "contradiction_rate": 0.1})
+    hop = _write(active_run / "hop.json", {"hop": 1})
+    code, _, err = cli("apply-hop-decision", "--topic", "Greenville ALPR", "--response-file", resp,
+                       "--hop-data-file", hop)
+    assert code == 1 and "superseded" in err
+
+
+def test_build_case_record_ignores_superseded_topics():
+    from state import build_case_record
+    from score_updates import compute_run_outcome
+    topics = [
+        {"topic": "old", "depth": "quick", "status": "superseded", "confidence_history": [0.1],
+         "contradiction_rate": 0.9, "hop_genealogy": [{}]},
+        {"topic": "new", "depth": "quick", "status": "complete", "confidence_history": [0.9],
+         "contradiction_rate": 0.1, "hop_genealogy": [{}, {}]},
+    ]
+    case = build_case_record({"run_id": "r", "topics": topics, "superseded": {"old": "merged"}},
+                             {"query": "q"})
+    assert case["confidence_per_topic"] == {"new": 0.9}
+    assert case["contradiction_rate"] == 0.1
+    assert case["hops_executed"] == 3 and case["depths_used"]["quick"] == 2
+    assert case["superseded"] == {"old": "merged"}
+    assert compute_run_outcome(case) == "W"
+
+
+def test_compute_confidence_dict_without_fetched_fails(tmp_path, cli, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    code, _, err = cli("compute-confidence", "--sources-file", _write(tmp_path / "x.json", {"a": 1}),
+                       "--depth", "quick")
+    assert code == 1 and "fetched" in err
+
+
+def test_compute_confidence_warns_without_selected_urls(tmp_path, cli, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data = {"fetched": [{"url": "a", "content": "x"}]}
+    code, _, err = cli("compute-confidence", "--sources-file", _write(tmp_path / "x.json", data),
+                       "--depth", "quick")
+    assert code == 0 and "without tier/primary signals" in err
+    data["search_context"] = None
+    code, _, err = cli("compute-confidence", "--sources-file", _write(tmp_path / "y.json", data),
+                       "--depth", "quick")
+    assert code == 0 and "Traceback" not in err
+
+
+def test_compute_confidence_merges_multiple_files(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    sel = [{"url": "a", "tier": "T1", "is_primary": True}, {"url": "b", "tier": "T2"}]
+    h1 = {"search_context": {"selected_urls": sel},
+          "fetched": [{"url": "a", "content": "1"}, {"url": "b", "content": "1"}]}
+    h2 = {"search_context": {"selected_urls": sel}, "fetched": [{"url": "a", "content": "2"}]}
+    monkeypatch.chdir(tmp_path)
+    code, out, _ = cli("compute-confidence", "--sources-file", _write(tmp_path / "h1.json", h1),
+                       "--sources-file", _write(tmp_path / "h2.json", h2), "--depth", "quick")
+    expected = compute_confidence([{"tier": "T1", "is_primary": True}, {"tier": "T2"}], depth="quick")
+    assert code == 0 and out == pytest.approx(expected)
+
+
+def test_topic_passes_skips_superseded():
+    from state import topic_passes
+    assert topic_passes({"depth": "quick", "confidence_history": [], "contradiction_rate": 0.9,
+                         "status": "superseded"})
 
 
 def test_record_user_decision_without_run_fails(vault, cli):

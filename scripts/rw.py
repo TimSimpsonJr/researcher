@@ -27,7 +27,9 @@ from detect_tier import (
     benchmark_ollama,
     build_tier_report,
     check_ollama,
+    check_playwright,
     check_searxng,
+    check_tesseract,
     check_whisper,
     check_ytdlp,
     detect_tier,
@@ -39,6 +41,7 @@ from state import (
     LockTimeoutError,
     abandon_run,
     acquire_state_lock,
+    add_manual_url,
     add_seen_urls,
     aggregate_fetch_results,
     aggregate_hop_summaries,
@@ -52,6 +55,7 @@ from state import (
     is_stale_run,
     load_run,
     load_stage_output,
+    mark_superseded,
     note_modified_since,
     quality_gate,
     record_applied_pattern,
@@ -169,6 +173,8 @@ def cmd_check(args):
         "ollama": check_ollama,
         "ytdlp": check_ytdlp,
         "whisper": check_whisper,
+        "playwright": check_playwright,
+        "tesseract": check_tesseract,
         "platform": get_platform_info,
     }
     _out(checks[args.component]())
@@ -296,6 +302,32 @@ def cmd_add_seen_urls(args):
     _out({"topic": args.topic})
 
 
+def cmd_add_browser_fetch(args):
+    sd = _state_dir(args)
+    results = sd / f"fetch_results_hop{args.hop}.json"
+    if not results.is_file():
+        raise CLIError(f"{results.name} not found; run fetch_and_clean.py for hop {args.hop} first")
+    # fetch_and_clean pulls in pymupdf/playwright; import it only for this command.
+    import fetch_and_clean
+    fetch_and_clean.validate_url(args.url)  # same SSRF guard as every other fetch
+    content = Path(args.content_file).read_text(encoding="utf-8")  # before any state write
+    if not content.strip():
+        raise CLIError("content file is empty")
+    run = load_run(sd)  # validate the topic without writing, so a failed cache write leaves no trace
+    if run is None:
+        raise RuntimeError("No active run")
+    if not any(t["topic"] == args.topic for t in run["topics"]):
+        raise KeyError(f"Topic not found: {args.topic}")
+    record = fetch_and_clean.add_browser_fetch(results, args.url, args.title, content, Path(args.cache_dir or fetch_and_clean.DEFAULT_CACHE_DIR))
+    add_seen_urls(sd, topic_name=args.topic, urls=[args.url])
+    _out({"url": args.url, "hop": args.hop, "word_count": record["word_count"]})
+
+
+def cmd_add_manual_url(args):
+    add_manual_url(_state_dir(args), args.url, args.reason, args.topic)
+    _out({"url": args.url, "reason": args.reason})
+
+
 def cmd_apply_hop_decision(args):
     resp = _read_json(args.response_file)
     decision = args.decision or resp["decision"]
@@ -312,14 +344,60 @@ def cmd_apply_hop_decision(args):
     _out({"topic": args.topic, "decision": decision})
 
 
+def _confidence_sources(data, topic=None) -> list[dict]:
+    """A bare sources list, or a fetch_results file ({"fetched": [...]}).
+
+    From fetch_results, use the fetched entries not marked usable: false, with
+    tier / is_primary / credibility_score copied from the matching
+    search_context.selected_urls entry (fetched entries don't carry them).
+    With topic, keep only entries whose selected_urls entry is stamped with that
+    topic (a hop's fetch_results is shared by every active topic); if no entry
+    carries a topic stamp, warn and keep them all.
+    """
+    if isinstance(data, list):
+        return data
+    if "fetched" not in data:
+        raise ValueError("sources file must be a list or a fetch_results object with 'fetched'")
+    selected = {
+        s["url"]: s for s in (data.get("search_context") or {}).get("selected_urls", [])
+        if isinstance(s, dict) and "url" in s
+    }
+    if data["fetched"] and not selected:
+        print("warning: fetch_results has no search_context.selected_urls; "
+              "sources are scored without tier/primary signals", file=sys.stderr)
+    if topic is not None and not any("topic" in s for s in selected.values()):
+        print("warning: --topic given but selected_urls has no topic stamps; "
+              "counting every source in the file", file=sys.stderr)
+        topic = None
+    sources = []
+    for entry in data.get("fetched", []):
+        if entry.get("usable") is False:
+            continue
+        if topic is not None and selected.get(entry["url"], {}).get("topic") != topic:
+            continue
+        signals = {k: v for k, v in selected.get(entry["url"], {}).items()
+                   if k in ("tier", "is_primary", "credibility_score")}
+        sources.append({**signals, **entry})
+    return sources
+
+
 def cmd_compute_confidence(args):
-    _out(compute_confidence(_read_json(args.sources_file), depth=args.depth))
+    files = args.sources_file
+    sources = [s for path in files for s in _confidence_sources(_read_json(path), args.topic)]
+    if len(files) > 1:  # multi-hop: one source per URL, later file wins
+        sources = list({s.get("url", id(s)): s for s in sources}.values())
+    _out(compute_confidence(sources, depth=args.depth))
 
 
 # --- quality gate, aggregation, write -----------------------------------------
 
 def cmd_quality_gate(args):
     _out(quality_gate(_active_run(_state_dir(args))))
+
+
+def cmd_mark_superseded(args):
+    mark_superseded(_state_dir(args), args.topic, args.reason)
+    _out({"topic": args.topic, "status": "superseded"})
 
 
 def cmd_apply_replan_readmit(args):
@@ -478,7 +556,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("detect-tier", cmd_detect_tier, "highest available tier, no auto-start")
     p.add_argument("--searxng-url")
     p = add("check", cmd_check, "check one component")
-    p.add_argument("component", choices=["ollama", "ytdlp", "whisper", "searxng", "platform"])
+    p.add_argument("component", choices=["ollama", "ytdlp", "whisper", "searxng", "platform",
+                                         "playwright", "tesseract"])
     p.add_argument("--url", help="SearXNG URL (for: check searxng)")
     add("hardware-info", cmd_hardware_info, "total RAM and GPU VRAM in GB")
     p = add("recommend-model", cmd_recommend_model, "Ollama model for this hardware")
@@ -517,16 +596,33 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("add-seen-urls", cmd_add_seen_urls, "append fetched URLs to a topic's seen_urls")
     p.add_argument("--topic", required=True)
     p.add_argument("--urls", required=True, nargs="+")
+    p = add("add-browser-fetch", cmd_add_browser_fetch,
+            "record a page read in the orchestrator's browser into fetch_results_hop<N>.json")
+    p.add_argument("--hop", required=True)
+    p.add_argument("--topic", required=True)
+    p.add_argument("--url", required=True)
+    p.add_argument("--title", default="")
+    p.add_argument("--content-file", required=True)
+    p.add_argument("--cache-dir", help="fetch cache (default: the repo's .cache/fetch)")
+    p = add("add-manual-url", cmd_add_manual_url, "list a URL for the user to read by hand (Stage 10b)")
+    p.add_argument("--url", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--topic")
     p = add("apply-hop-decision", cmd_apply_hop_decision, "atomic Stage 4e hop transition")
     p.add_argument("--topic", required=True)
     p.add_argument("--response-file", required=True, help="the hop-planner JSON response")
     p.add_argument("--hop-data-file", required=True, help="the just-completed hop record")
     p.add_argument("--decision", choices=["continue", "stop", "early_terminated", "replan"],
                    help="override the planner decision (early_terminated)")
-    p = add("compute-confidence", cmd_compute_confidence, "confidence score for a sources JSON file")
-    p.add_argument("--sources-file", required=True)
+    p = add("compute-confidence", cmd_compute_confidence, "confidence score for a sources list or fetch_results JSON file")
+    p.add_argument("--sources-file", required=True, action="append",
+                   help="repeatable; with several files sources are merged by URL, later file wins")
     p.add_argument("--depth", required=True, choices=["quick", "standard", "deep", "exhaustive"])
+    p.add_argument("--topic", help="count only fetch_results sources whose selected_urls entry has this topic")
     add("quality-gate", cmd_quality_gate, "Stage 5a per-topic pass/fail and worst confidence")
+    p = add("mark-superseded", cmd_mark_superseded, "retire a topic; the quality gate skips it")
+    p.add_argument("--topic", required=True)
+    p.add_argument("--reason", required=True)
     p = add("apply-replan-readmit", cmd_apply_replan_readmit, "atomic Stage 5b/5c re-admission")
     p.add_argument("--specs-file", required=True,
                    help="JSON list of {topic_name, replan_hint (object or null)}")

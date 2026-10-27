@@ -8,7 +8,7 @@ Used by the research pipeline when local files are provided as input.
 
 from pathlib import Path
 
-import fitz  # pymupdf
+import pymupdf
 import docx  # python-docx
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc"}
@@ -16,7 +16,7 @@ SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc"}
 
 def _extract_pdf(file_path: Path) -> dict:
     """Extract text from PDF via pymupdf, one section per page."""
-    doc = fitz.open(str(file_path))
+    doc = pymupdf.open(str(file_path))
     pages = []
     for page in doc:
         text = page.get_text().strip()

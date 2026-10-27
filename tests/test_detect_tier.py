@@ -1,6 +1,7 @@
 """Tests for detect_tier.py — infrastructure detection."""
 
 import sys
+from pathlib import Path
 
 import pytest
 from unittest.mock import patch, MagicMock
@@ -94,16 +95,133 @@ def test_detect_tier_full():
     assert tier == "full"
 
 
+def _fake_playwright(monkeypatch, exe_path):
+    import types
+    sync_api = types.ModuleType("playwright.sync_api")
+
+    class _Manager:
+        chromium = types.SimpleNamespace(executable_path=str(exe_path))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    sync_api.sync_playwright = lambda: _Manager()
+    package = types.ModuleType("playwright")
+    package.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+
+
 def test_playwright_detection_when_unavailable(monkeypatch):
     from detect_tier import check_playwright
     monkeypatch.setitem(sys.modules, "playwright", None)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
     result = check_playwright()
-    assert result["status"] in {"missing", "error"}
+    assert result["status"] == "missing" and "not installed" in result["reason"]
 
 
-def test_playwright_detection_when_available(monkeypatch):
+def test_playwright_detection_needs_chromium(monkeypatch, tmp_path):
     from detect_tier import check_playwright
-    fake_module = type(sys)("playwright")
-    monkeypatch.setitem(sys.modules, "playwright", fake_module)
+    _fake_playwright(monkeypatch, tmp_path / "chrome.exe")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "empty"))
     result = check_playwright()
-    assert result["status"] == "ok"
+    assert result["status"] == "missing" and "playwright install chromium" in result["install"]
+
+
+def test_playwright_check_uses_the_repo_browser_cache(monkeypatch, tmp_path):
+    import os
+    import detect_tier
+    from detect_tier import check_playwright
+    _fake_playwright(monkeypatch, tmp_path / "chrome.exe")
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.setattr(detect_tier, "_headless_shell", lambda exe: None)
+    result = check_playwright()
+    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"].replace("\\", "/").endswith(".cache/ms-playwright")
+    assert "PLAYWRIGHT_BROWSERS_PATH=" in result["install"] and ".cache/ms-playwright" in result["install"]
+
+
+def test_importing_detect_tier_or_rw_does_not_load_pymupdf_or_playwright():
+    import subprocess
+    scripts = str(Path(__file__).parent.parent / "scripts")
+    for module in ("detect_tier", "rw"):
+        code = (f"import sys; sys.path.insert(0, {scripts!r}); import {module}; "
+                "print(sorted(m for m in ('pymupdf', 'fitz', 'playwright') if m in sys.modules))")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "[]", f"{module} imported {out.stdout.strip()}"
+
+
+def test_playwright_detection_when_available(monkeypatch, tmp_path):
+    from detect_tier import check_playwright
+    exe = tmp_path / "chrome.exe"
+    exe.write_bytes(b"")
+    _fake_playwright(monkeypatch, exe)
+    assert check_playwright() == {"status": "ok", "executable": str(exe)}
+
+
+def test_playwright_ok_with_only_the_headless_shell(monkeypatch, tmp_path):
+    from detect_tier import check_playwright
+    shell = tmp_path / "browsers" / "chromium_headless_shell-1243" / "chrome-headless-shell-win64"
+    shell.mkdir(parents=True)
+    exe = shell / "chrome-headless-shell.exe"
+    exe.write_bytes(b"")
+    _fake_playwright(monkeypatch, tmp_path / "browsers" / "chromium-1243" / "chrome-win64" / "chrome.exe")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+    result = check_playwright()
+    assert result["status"] == "ok" and Path(result["executable"]) == exe
+
+
+def test_playwright_missing_when_shell_dir_has_no_executable(monkeypatch, tmp_path):
+    from detect_tier import check_playwright
+    (tmp_path / "browsers" / "chromium_headless_shell-1243").mkdir(parents=True)
+    _fake_playwright(monkeypatch, tmp_path / "browsers" / "chromium-1243" / "chrome-win64" / "chrome.exe")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+    assert check_playwright()["status"] == "missing"
+
+
+def test_playwright_stale_headless_shell_revision_is_missing(monkeypatch, tmp_path):
+    from detect_tier import check_playwright
+    stale = tmp_path / "browsers" / "chromium_headless_shell-1100" / "chrome-headless-shell-win64"
+    stale.mkdir(parents=True)
+    (stale / "chrome-headless-shell.exe").write_bytes(b"")
+    _fake_playwright(monkeypatch, tmp_path / "browsers" / "chromium-1243" / "chrome-win64" / "chrome.exe")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+    assert check_playwright()["status"] == "missing"
+
+
+def test_playwright_install_command_is_shell_only():
+    from detect_tier import PLAYWRIGHT_INSTALL
+    assert PLAYWRIGHT_INSTALL.endswith("playwright install chromium --only-shell")
+
+
+def test_check_tesseract(monkeypatch):
+    import detect_tier
+    import pdf_extract
+    monkeypatch.setattr(detect_tier.shutil, "which", lambda name: None)
+    monkeypatch.setattr(pdf_extract, "tesseract_available", lambda: False)
+    result = detect_tier.check_tesseract()
+    assert result == {"status": "missing", "optional": True,
+                      "install": "winget install UB-Mannheim.TesseractOCR"}
+    monkeypatch.setattr(pdf_extract, "tesseract_available", lambda: True)
+    assert detect_tier.check_tesseract() == {"status": "ok"}
+    monkeypatch.setattr(pdf_extract, "tesseract_available", lambda: False)
+    monkeypatch.setattr(detect_tier.shutil, "which", lambda name: "C:/Program Files/Tesseract-OCR/tesseract.exe")
+    assert detect_tier.check_tesseract() == {"status": "ok"}
+
+
+def test_tier_report_lists_tesseract_without_changing_tier(monkeypatch):
+    import detect_tier
+    monkeypatch.setattr(detect_tier, "check_ollama", lambda: {"installed": False, "running": False})
+    monkeypatch.setattr(detect_tier, "ensure_searxng", lambda url, root: {"available": False, "url": None})
+    monkeypatch.setattr(detect_tier, "check_ytdlp", lambda: {"installed": False})
+    monkeypatch.setattr(detect_tier, "check_whisper", lambda: {"installed": False})
+    monkeypatch.setattr(detect_tier, "check_playwright", lambda: {"status": "ok"})
+    monkeypatch.setattr(detect_tier, "check_tesseract", lambda: {"status": "missing", "optional": True})
+    report = detect_tier.build_tier_report(None)
+    assert report["components"]["tesseract"]["status"] == "missing"
+    assert report["components"]["playwright"]["status"] == "ok"
+    assert report["tier"] == "base"
+    assert not any("esseract" in m for m in report["missing_for_full"])

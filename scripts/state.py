@@ -139,6 +139,8 @@ def mark_topic_status(state_dir: Path, topic_name: str, status: str) -> None:
         raise RuntimeError("No active run")
     for t in run["topics"]:
         if t["topic"] == topic_name:
+            if t.get("status") == "superseded":
+                raise ValueError(f"Topic is superseded: {topic_name}")
             t["status"] = status
             break
     else:
@@ -261,6 +263,21 @@ def add_seen_urls(state_dir: Path, topic_name: str, urls: list[str]) -> None:
     save_state(state_dir, run)
 
 
+def add_manual_url(state_dir: Path, url: str, reason: str, topic: str | None = None) -> None:
+    """List a URL for the user to read by hand (a CAPTCHA, or no browser tools).
+
+    Stage 10b prints run["manual_urls"]. Deduplicated by URL.
+    """
+    run = load_run(state_dir)
+    if run is None:
+        raise RuntimeError("No active run")
+    manual = run.setdefault("manual_urls", [])
+    if any(m["url"] == url for m in manual):
+        return
+    manual.append({"url": url, "reason": reason, "topic": topic})
+    save_state(state_dir, run)
+
+
 _RESERVED_DECISION_KEYS = {"decision", "at"}
 
 
@@ -362,6 +379,7 @@ def apply_replan_readmit(
     overwrites whatever was there.
 
     Raises KeyError if any topic_name does not exist in the run.
+    Raises ValueError for a superseded topic (nothing is saved).
     Raises RuntimeError if there is no active run.
     """
     run = load_run(state_dir)
@@ -373,6 +391,8 @@ def apply_replan_readmit(
         if name not in topics_by_name:
             raise KeyError(f"Topic not found: {name}")
         t = topics_by_name[name]
+        if t.get("status") == "superseded":
+            raise ValueError(f"Topic is superseded: {name}")
         if spec.get("replan_hint") is not None:
             t["replan_hint"] = spec["replan_hint"]
         t["max_hops"] += 1
@@ -414,6 +434,8 @@ def apply_hop_decision(
         raise RuntimeError("No active run")
     for t in run["topics"]:
         if t["topic"] == topic_name:
+            if t.get("status") == "superseded":
+                raise ValueError(f"Topic is superseded: {topic_name}")
             # Always: record the hop, advance current_hop, persist quality signals
             t["hop_genealogy"].append(hop_data)
             t["current_hop"] += 1
@@ -451,20 +473,24 @@ def _latest_confidence(topic: dict) -> float:
 
 def topic_passes(topic: dict) -> bool:
     """Stage 5a: latest confidence >= the depth's confidence_target AND
-    contradiction_rate <= 0.3. A topic with no confidence yet scores 0.0."""
+    contradiction_rate <= 0.3. A topic with no confidence yet scores 0.0.
+    A superseded topic is out of the gate and always passes."""
+    if topic.get("status") == "superseded":
+        return True
     target = get_depth_profile(topic["depth"])["confidence_target"]
     return (_latest_confidence(topic) >= target
             and topic["contradiction_rate"] <= QUALITY_MAX_CONTRADICTION)
 
 
 def quality_gate(run: dict) -> dict:
-    """Stage 5a per-topic pass/fail for the run.
+    """Stage 5a per-topic pass/fail for the run, ignoring superseded topics.
 
     worst_confidence (the lowest latest confidence, 0.0 if none) is the
     OVERALL_CONFIDENCE surfaced in Stage 5c prompts and 5d's
     final_confidence_score -- depths are per-topic, so there is no single
     run target.
     """
+    live = [t for t in run["topics"] if t.get("status") != "superseded"]
     topics = [
         {
             "topic": t["topic"],
@@ -474,15 +500,33 @@ def quality_gate(run: dict) -> dict:
             "replan_hint": t.get("replan_hint"),
             "passes": topic_passes(t),
         }
-        for t in run["topics"]
+        for t in live
     ]
     return {
         "passed": all(t["passes"] for t in topics),
         "failing_topics": [t for t in topics if not t["passes"]],
         "topics": topics,
+        "superseded": [t["topic"] for t in run["topics"] if t.get("status") == "superseded"],
         "worst_confidence": min((t["confidence"] for t in topics), default=0.0),
         "replan_count": run["replan_count"],
     }
+
+
+def mark_superseded(state_dir: Path, topic_name: str, reason: str) -> None:
+    """Retire a topic another one replaced; the quality gate then skips it."""
+    run = load_run(state_dir)
+    if run is None:
+        raise RuntimeError("No active run")
+    for t in run["topics"]:
+        if t["topic"] == topic_name:
+            if not any(o is not t and o.get("status") != "superseded" for o in run["topics"]):
+                raise ValueError("cannot supersede the last live topic")
+            t["status"] = "superseded"
+            break
+    else:
+        raise KeyError(f"Topic not found: {topic_name}")
+    run.setdefault("superseded", {})[topic_name] = reason
+    save_state(state_dir, run)
 
 
 _HOP_RE = re.compile(r"_hop(\d+)([a-z]?)(?:_(.*))?$")
@@ -497,12 +541,19 @@ def _hop_files(state_dir: Path, prefix: str) -> list[Path]:
 
 
 def aggregate_hop_summaries(state_dir: Path, project: str) -> dict:
-    """Stage 6a: merge every summaries_hop*.json's items into summaries.json."""
+    """Stage 6a: merge every summaries_hop*.json's items into summaries.json.
+
+    Each item gets topic_key and hop from its filename (summaries_hop<N>[_<key>])
+    unless it already carries them.
+    """
     seen: dict = {}  # insertion order = first-seen; later hops overwrite the value
     for hop_file in _hop_files(state_dir, "summaries"):
         m = _HOP_RE.search(hop_file.stem)
         key = (m.group(3) or "") if m else ""
+        hop = int(m.group(1)) if m else None
         for item in json.loads(hop_file.read_text(encoding="utf-8")).get("items", []):
+            item.setdefault("topic_key", key or None)
+            item.setdefault("hop", hop)
             seen[(key, item.get("url"), item.get("title"))] = item
     combined = {"topic": project, "items": list(seen.values())}
     save_stage_output(state_dir, "summaries", combined)
@@ -598,6 +649,8 @@ def create_run(state_dir: Path, run_id: str, tier: str) -> dict:
         "replan_count": 0,
         "user_decisions": [],
         "applied_patterns": [],
+        "manual_urls": [],
+        "superseded": {},
     }
     _atomic_write(run_file, run)
     return run
@@ -745,6 +798,7 @@ def build_case_record(final: dict, inputs: dict) -> dict:
     it, and dropping it silently turns the score/demotion loop into a no-op.
     """
     topics = final.get("topics", [])
+    live = [t for t in topics if t.get("status") != "superseded"]
     return {
         "case_id": final["run_id"],
         "version": 1,
@@ -755,9 +809,10 @@ def build_case_record(final: dict, inputs: dict) -> dict:
         "hops_executed": sum(len(t.get("hop_genealogy", [])) for t in topics),
         "confidence_per_topic": {
             t["topic"]: (t["confidence_history"][-1] if t.get("confidence_history") else None)
-            for t in topics
+            for t in live
         },
-        "contradiction_rate": max((t.get("contradiction_rate", 0.0) for t in topics), default=0.0),
+        "contradiction_rate": max((t.get("contradiction_rate", 0.0) for t in live), default=0.0),
+        "superseded": final.get("superseded", {}),
         "patterns_that_worked": _pattern_dict(inputs.get("patterns_that_worked")),
         "patterns_that_failed": _pattern_dict(inputs.get("patterns_that_failed")),
         "applied_patterns": final.get("applied_patterns", []),

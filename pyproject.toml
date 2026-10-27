@@ -9,6 +9,7 @@ dependencies = [
     "python-docx",
     "rich",
     "PyYAML",
+    "playwright>=1.48,<1.64",
 ]
 # Optional full-tier tools (yt-dlp, openai-whisper) stay outside this lock;
 # /researcher-setup installs them with `uv tool install`.
@@ -24,3 +25,6 @@ package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "browser: drives a real Chromium (PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright uv run --frozen playwright install chromium --only-shell); skipped when it is missing",
+]

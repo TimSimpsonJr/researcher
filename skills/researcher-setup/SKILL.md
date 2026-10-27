@@ -31,6 +31,16 @@ uv sync --frozen --project "REPO"
 ```
 This creates `REPO/.venv` from `REPO/uv.lock` (downloading Python 3.12 if needed). If it fails, report the error and attempt to continue — the Python environment may need troubleshooting.
 
+Then check the local browser fallback, which reads pages and PDFs that block scripted fetchers:
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" check playwright
+```
+If `status` is not `ok`, use AskUserQuestion: "Download Chromium's headless shell for the local browser fallback (about 115 MB download, about 270 MB on disk, stored in REPO/.cache)? [yes / skip]". On yes:
+```bash
+PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" uv run --frozen --project "REPO" playwright install chromium --only-shell
+```
+Then run the check again and report the result. On skip, note that pages behind bot walls will go to the orchestrator's browser or the manual-read list instead.
+
 ---
 
 ## Step 1: Vault Path
@@ -293,6 +303,30 @@ Set `whisper_available = False`. Do not offer to auto-install — it's heavy.
 
 ---
 
+## Step 7b: Tesseract (optional OCR)
+
+Check availability. Use Bash:
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" check tesseract
+```
+
+**If `status` is `ok`:** Report `Tesseract is available: scanned PDFs are OCR'd locally.`
+
+**If missing:** Report:
+```
+Tesseract is not installed. It OCRs scanned (image-only) PDFs. Without it,
+those PDFs are saved and Claude reads the page images instead, which costs
+more tokens.
+
+To install later:
+  Windows:  winget install UB-Mannheim.TesseractOCR
+  macOS:    brew install tesseract
+  Linux:    sudo apt install tesseract-ocr
+```
+Do not install it automatically. It does not change the tier.
+
+---
+
 ## Step 8: SearXNG
 
 Use AskUserQuestion:
@@ -483,6 +517,8 @@ Tools:
   - Ollama: {installed/not installed} {model if applicable}
   - yt-dlp: {available/not available}
   - Whisper: {available/not available}
+  - Chromium (local browser fallback): {ok/missing}
+  - Tesseract (PDF OCR, optional): {ok/missing}
   - SearXNG: {url or "not configured"}
 
 Vault conventions:

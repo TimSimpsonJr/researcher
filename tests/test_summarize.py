@@ -241,3 +241,88 @@ def test_cli_ollama_mode_emits_items_key(tmp_path, monkeypatch):
     assert "items" in result, f"expected 'items' key in CLI output, got: {list(result.keys())}"
     assert "summaries" not in result, "legacy 'summaries' key should be gone"
     assert isinstance(result["items"], list)
+
+
+IMAGE_PDF = {"url": "https://a.gov/minutes.pdf", "title": "Minutes", "content": "",
+             "image_only_pdf": True, "pdf_path": "C:/cache/pdf/ab.pdf"}
+
+
+def test_summarize_batch_flags_image_only_pdf_without_ollama():
+    from summarize import summarize_batch
+    with patch("summarize.requests.post") as post:
+        summaries = summarize_batch({"fetched": [IMAGE_PDF]}, model="m")
+    post.assert_not_called()
+    assert summaries == [{"url": "https://a.gov/minutes.pdf", "title": "Minutes", "usable": False,
+                          "reason": "needs visual read", "image_only_pdf": True,
+                          "pdf_path": "C:/cache/pdf/ab.pdf"}]
+
+
+def test_cli_stats_count_visual_reads(tmp_path):
+    import sys
+    import summarize as sm
+    inp = tmp_path / "in.json"
+    inp.write_text(json.dumps({"fetched": [
+        {"url": "https://a.com", "title": "A", "content": "Content A"}, IMAGE_PDF]}), encoding="utf-8")
+    out = tmp_path / "out.json"
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {"response": json.dumps({
+        "summary": "S", "source_type": "journalism", "key_entities": [], "key_claims": []})}
+    with patch.object(sm, "requests") as mock_req:
+        mock_req.post.return_value = mock_response
+        argv_backup = sys.argv
+        sys.argv = ["summarize.py", "--input", str(inp), "--output", str(out), "--model", "m"]
+        try:
+            sm.main()
+        finally:
+            sys.argv = argv_backup
+    result = json.loads(out.read_text(encoding="utf-8"))
+    assert mock_req.post.call_count == 1  # only the non-skipped item reaches Ollama
+    assert result["stats"] == {"total": 2, "summarized": 1, "needs_visual_read": 1, "failed": 0}
+
+
+OLLAMA_OK = {"response": json.dumps({
+    "summary": "S", "source_type": "government", "key_entities": [], "key_claims": []})}
+
+
+def test_image_only_pdf_with_text_is_summarized_and_keeps_pdf_fields():
+    from summarize import summarize_batch
+    item = {**IMAGE_PDF, "content": "Partial OCR text. " * 40}
+    resp = MagicMock()
+    resp.json.return_value = OLLAMA_OK
+    with patch("summarize.requests.post", return_value=resp) as post:
+        summaries = summarize_batch({"fetched": [item]}, model="m")
+    assert post.call_count == 1
+    assert summaries[0]["summary"] == "S"
+    assert summaries[0]["image_only_pdf"] is True
+    assert summaries[0]["pdf_path"] == "C:/cache/pdf/ab.pdf"
+    assert summaries[0].get("usable", True) is True
+
+
+def test_image_only_flag_without_pdf_path_is_not_a_visual_read(tmp_path):
+    from summarize import prepare_for_claude_code, summarize_batch
+    item = {**IMAGE_PDF, "pdf_path": None, "content": ""}
+    resp = MagicMock()
+    resp.json.return_value = OLLAMA_OK
+    with patch("summarize.requests.post", return_value=resp) as post:
+        summaries = summarize_batch({"fetched": [item]}, model="m")
+    assert post.call_count == 1 and summaries[0].get("usable", True) is True
+    entry = prepare_for_claude_code({"fetched": [item]}, tmp_path)[0]
+    assert "image_only_pdf" not in entry
+    assert "Image-only PDF" not in (tmp_path / entry["file"]).read_text(encoding="utf-8")
+
+
+def test_prepare_writes_windows_pdf_path_verbatim(tmp_path):
+    from summarize import prepare_for_claude_code
+    p = r"C:\Users\tim\Tim's Vault\cache\pdf\ab.pdf"
+    entry = prepare_for_claude_code({"fetched": [{**IMAGE_PDF, "pdf_path": p}]}, tmp_path)[0]
+    assert f"read the page images at {p}\n" in (tmp_path / entry["file"]).read_text(encoding="utf-8")
+    assert entry["pdf_path"] == p
+
+
+def test_prepare_for_claude_marks_image_only_pdf(tmp_path):
+    from summarize import prepare_for_claude_code
+    output = prepare_for_claude_code({"fetched": [IMAGE_PDF]}, tmp_path)
+    text = (tmp_path / output[0]["file"]).read_text(encoding="utf-8")
+    assert "Image-only PDF: read the page images at C:/cache/pdf/ab.pdf" in text
+    assert output[0]["image_only_pdf"] is True and output[0]["pdf_path"] == "C:/cache/pdf/ab.pdf"
