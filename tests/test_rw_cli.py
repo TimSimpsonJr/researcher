@@ -608,6 +608,24 @@ def test_compute_confidence_needs_no_vault(tmp_path, cli, monkeypatch):
     assert code == 0 and out == pytest.approx(compute_confidence(sources, depth="quick"))
 
 
+def test_compute_confidence_accepts_fetch_results(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    data = {
+        "search_context": {"selected_urls": [
+            {"url": "a", "tier": "T1", "is_primary": True},
+            {"url": "b", "tier": "T2"},
+            {"url": "c", "tier": "T1", "is_primary": True},
+        ]},
+        "fetched": [{"url": "a", "content": "x"}, {"url": "b", "content": "y"},
+                    {"url": "c", "content": "z", "usable": False}],
+    }
+    monkeypatch.chdir(tmp_path)
+    code, out, _ = cli("compute-confidence", "--sources-file", _write(tmp_path / "fr.json", data),
+                       "--depth", "quick")
+    expected = compute_confidence([{"tier": "T1", "is_primary": True}, {"tier": "T2"}], depth="quick")
+    assert code == 0 and out == pytest.approx(expected)
+
+
 # --- quality gate, aggregation, write ---------------------------------------
 
 def test_topic_passes_boundaries():
@@ -668,7 +686,8 @@ def test_aggregate_summaries(active_run, cli):
     code, out, _ = cli("aggregate-summaries", "--project", "ALPR")
     assert code == 0 and out["items"] == 2
     combined = json.loads((sd / "summaries.json").read_text(encoding="utf-8"))
-    assert combined == {"topic": "ALPR", "items": [{"url": "a"}, {"url": "b"}]}
+    assert combined == {"topic": "ALPR", "items": [
+        {"url": "a", "topic_key": None, "hop": 1}, {"url": "b", "topic_key": None, "hop": 2}]}
 
 
 def test_aggregate_fetch_results_later_hop_wins(active_run, cli):
@@ -709,6 +728,41 @@ def test_aggregate_hop_order_is_numeric(active_run, cli):
     assert json.loads((sd / "summaries.json").read_text(encoding="utf-8"))["items"][0]["v"] == 10
     agg = json.loads((sd / "fetch_results_aggregated.json").read_text(encoding="utf-8"))
     assert agg["by_url"]["u"]["content"] == "ten"
+
+
+def test_aggregate_summaries_stamps_topic_key_and_hop(active_run, cli):
+    sd = _state(active_run)
+    _write(sd / "summaries_hop2_alpr.json", {"items": [{"url": "u", "title": "A"},
+                                                       {"url": "v", "title": "B", "topic_key": "kept"}]})
+    cli("aggregate-summaries", "--project", "P")
+    items = json.loads((sd / "summaries.json").read_text(encoding="utf-8"))["items"]
+    assert [(i["topic_key"], i["hop"]) for i in items] == [("alpr", 2), ("kept", 2)]
+
+
+def test_mark_superseded_takes_topic_out_of_the_gate(active_run, cli):
+    code, out, _ = cli("mark-superseded", "--topic", "Greenville ALPR", "--reason", "merged into Flock topic")
+    assert code == 0 and out == {"topic": "Greenville ALPR", "status": "superseded"}
+    resp = _write(active_run / "resp.json", {"decision": "stop", "confidence_score": 0.95, "contradiction_rate": 0.1})
+    hop = _write(active_run / "hop.json", {"hop": 1})
+    cli("apply-hop-decision", "--topic", "Flock Safety contracts", "--response-file", resp, "--hop-data-file", hop)
+    gate = cli("quality-gate")[1]
+    assert gate["passed"] is True and gate["superseded"] == ["Greenville ALPR"]
+    assert [t["topic"] for t in gate["topics"]] == ["Flock Safety contracts"]
+    assert gate["worst_confidence"] == 0.95
+    run = _run_file(active_run)
+    assert run["topics"][0]["status"] == "superseded"
+    assert run["superseded"] == {"Greenville ALPR": "merged into Flock topic"}
+
+
+def test_mark_superseded_unknown_topic_fails(active_run, cli):
+    code, _, err = cli("mark-superseded", "--topic", "Nope", "--reason", "x")
+    assert code == 1 and "Topic not found" in err
+
+
+def test_topic_passes_skips_superseded():
+    from state import topic_passes
+    assert topic_passes({"depth": "quick", "confidence_history": [], "contradiction_rate": 0.9,
+                         "status": "superseded"})
 
 
 def test_record_user_decision_without_run_fails(vault, cli):

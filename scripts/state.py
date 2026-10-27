@@ -466,20 +466,24 @@ def _latest_confidence(topic: dict) -> float:
 
 def topic_passes(topic: dict) -> bool:
     """Stage 5a: latest confidence >= the depth's confidence_target AND
-    contradiction_rate <= 0.3. A topic with no confidence yet scores 0.0."""
+    contradiction_rate <= 0.3. A topic with no confidence yet scores 0.0.
+    A superseded topic is out of the gate and always passes."""
+    if topic.get("status") == "superseded":
+        return True
     target = get_depth_profile(topic["depth"])["confidence_target"]
     return (_latest_confidence(topic) >= target
             and topic["contradiction_rate"] <= QUALITY_MAX_CONTRADICTION)
 
 
 def quality_gate(run: dict) -> dict:
-    """Stage 5a per-topic pass/fail for the run.
+    """Stage 5a per-topic pass/fail for the run, ignoring superseded topics.
 
     worst_confidence (the lowest latest confidence, 0.0 if none) is the
     OVERALL_CONFIDENCE surfaced in Stage 5c prompts and 5d's
     final_confidence_score -- depths are per-topic, so there is no single
     run target.
     """
+    live = [t for t in run["topics"] if t.get("status") != "superseded"]
     topics = [
         {
             "topic": t["topic"],
@@ -489,15 +493,31 @@ def quality_gate(run: dict) -> dict:
             "replan_hint": t.get("replan_hint"),
             "passes": topic_passes(t),
         }
-        for t in run["topics"]
+        for t in live
     ]
     return {
         "passed": all(t["passes"] for t in topics),
         "failing_topics": [t for t in topics if not t["passes"]],
         "topics": topics,
+        "superseded": [t["topic"] for t in run["topics"] if t.get("status") == "superseded"],
         "worst_confidence": min((t["confidence"] for t in topics), default=0.0),
         "replan_count": run["replan_count"],
     }
+
+
+def mark_superseded(state_dir: Path, topic_name: str, reason: str) -> None:
+    """Retire a topic another one replaced; the quality gate then skips it."""
+    run = load_run(state_dir)
+    if run is None:
+        raise RuntimeError("No active run")
+    for t in run["topics"]:
+        if t["topic"] == topic_name:
+            t["status"] = "superseded"
+            break
+    else:
+        raise KeyError(f"Topic not found: {topic_name}")
+    run.setdefault("superseded", {})[topic_name] = reason
+    save_state(state_dir, run)
 
 
 _HOP_RE = re.compile(r"_hop(\d+)([a-z]?)(?:_(.*))?$")
@@ -512,12 +532,19 @@ def _hop_files(state_dir: Path, prefix: str) -> list[Path]:
 
 
 def aggregate_hop_summaries(state_dir: Path, project: str) -> dict:
-    """Stage 6a: merge every summaries_hop*.json's items into summaries.json."""
+    """Stage 6a: merge every summaries_hop*.json's items into summaries.json.
+
+    Each item gets topic_key and hop from its filename (summaries_hop<N>[_<key>])
+    unless it already carries them.
+    """
     seen: dict = {}  # insertion order = first-seen; later hops overwrite the value
     for hop_file in _hop_files(state_dir, "summaries"):
         m = _HOP_RE.search(hop_file.stem)
         key = (m.group(3) or "") if m else ""
+        hop = int(m.group(1)) if m else None
         for item in json.loads(hop_file.read_text(encoding="utf-8")).get("items", []):
+            item.setdefault("topic_key", key or None)
+            item.setdefault("hop", hop)
             seen[(key, item.get("url"), item.get("title"))] = item
     combined = {"topic": project, "items": list(seen.values())}
     save_stage_output(state_dir, "summaries", combined)

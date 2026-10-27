@@ -55,6 +55,7 @@ from state import (
     is_stale_run,
     load_run,
     load_stage_output,
+    mark_superseded,
     note_modified_since,
     quality_gate,
     record_applied_pattern,
@@ -338,14 +339,42 @@ def cmd_apply_hop_decision(args):
     _out({"topic": args.topic, "decision": decision})
 
 
+def _confidence_sources(data) -> list[dict]:
+    """A bare sources list, or a fetch_results file ({"fetched": [...]}).
+
+    From fetch_results, use the fetched entries not marked usable: false, with
+    tier / is_primary / credibility_score copied from the matching
+    search_context.selected_urls entry (fetched entries don't carry them).
+    """
+    if isinstance(data, list):
+        return data
+    selected = {
+        s["url"]: s for s in data.get("search_context", {}).get("selected_urls", [])
+        if isinstance(s, dict) and "url" in s
+    }
+    sources = []
+    for entry in data.get("fetched", []):
+        if entry.get("usable") is False:
+            continue
+        signals = {k: v for k, v in selected.get(entry["url"], {}).items()
+                   if k in ("tier", "is_primary", "credibility_score")}
+        sources.append({**signals, **entry})
+    return sources
+
+
 def cmd_compute_confidence(args):
-    _out(compute_confidence(_read_json(args.sources_file), depth=args.depth))
+    _out(compute_confidence(_confidence_sources(_read_json(args.sources_file)), depth=args.depth))
 
 
 # --- quality gate, aggregation, write -----------------------------------------
 
 def cmd_quality_gate(args):
     _out(quality_gate(_active_run(_state_dir(args))))
+
+
+def cmd_mark_superseded(args):
+    mark_superseded(_state_dir(args), args.topic, args.reason)
+    _out({"topic": args.topic, "status": "superseded"})
 
 
 def cmd_apply_replan_readmit(args):
@@ -562,10 +591,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hop-data-file", required=True, help="the just-completed hop record")
     p.add_argument("--decision", choices=["continue", "stop", "early_terminated", "replan"],
                    help="override the planner decision (early_terminated)")
-    p = add("compute-confidence", cmd_compute_confidence, "confidence score for a sources JSON file")
+    p = add("compute-confidence", cmd_compute_confidence, "confidence score for a sources list or fetch_results JSON file")
     p.add_argument("--sources-file", required=True)
     p.add_argument("--depth", required=True, choices=["quick", "standard", "deep", "exhaustive"])
     add("quality-gate", cmd_quality_gate, "Stage 5a per-topic pass/fail and worst confidence")
+    p = add("mark-superseded", cmd_mark_superseded, "retire a topic; the quality gate skips it")
+    p.add_argument("--topic", required=True)
+    p.add_argument("--reason", required=True)
     p = add("apply-replan-readmit", cmd_apply_replan_readmit, "atomic Stage 5b/5c re-admission")
     p.add_argument("--specs-file", required=True,
                    help="JSON list of {topic_name, replan_hint (object or null)}")

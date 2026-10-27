@@ -578,6 +578,14 @@ It prints `{passed, failing_topics, topics, worst_confidence, replan_count}`. A 
 
 If `failing_topics` is empty: proceed to Stage 6 (classify).
 
+A topic another one replaced (for example, merged into a sibling after a replan) can be retired instead of failing the gate:
+
+```bash
+uv run --frozen --project "REPO" "REPO/scripts/rw.py" mark-superseded --topic "TOPIC" --reason "REASON"
+```
+
+`quality-gate` then leaves it out of `topics` and `failing_topics` and lists it under `superseded`.
+
 For diagnostic display and the low-confidence note marker, `quality-gate` also returns `worst_confidence`: the lowest latest confidence across all topics (0.0 if none).
 
 This is the value used downstream as `OVERALL_CONFIDENCE` in Stage 5c's user-decision payload and 5d's `final_confidence_score`. There is no single "run target" because depths are per-topic, but the worst-topic confidence is the meaningful number to surface in user prompts and frontmatter callouts.
