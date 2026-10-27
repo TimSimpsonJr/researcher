@@ -100,6 +100,25 @@ def test_fetch_via_jina_classifies_a_wall(monkeypatch):
     assert r.verdict == blocked("cloudflare") and r.content == ""
 
 
+def _jina_wrapped(code, reason):
+    return (f"Title: Agenda\n\nURL Source: https://a.example/x\n\n"
+            f"Warning: Target URL returned error {code}: {reason}\n\nMarkdown Content:\n" + BODY)
+
+
+def test_fetch_via_jina_soft_404_is_missing(monkeypatch):
+    monkeypatch.setattr(fetch_and_clean.requests, "get",
+                        lambda *a, **k: _resp(200, _jina_wrapped(404, "Not Found")))
+    r = fetch_and_clean.fetch_via_jina("https://a.example/x")
+    assert r.verdict == Verdict("missing", "http_404") and r.content == ""
+
+
+def test_fetch_via_jina_soft_403_is_blocked(monkeypatch):
+    monkeypatch.setattr(fetch_and_clean.requests, "get",
+                        lambda *a, **k: _resp(200, _jina_wrapped(403, "Forbidden")))
+    r = fetch_and_clean.fetch_via_jina("https://a.example/x")
+    assert r.verdict == blocked("http_403")
+
+
 def test_fetch_via_jina_sends_key(monkeypatch):
     seen = {}
 

@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +49,7 @@ MAX_CONTENT_CHARS = 50_000
 JINA_BASE_URL = "https://r.jina.ai"
 MAX_REDIRECTS = 5
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+_JINA_TARGET_ERR = re.compile(r"^Warning: Target URL returned error (\d{3})", re.M)
 LIVE_METHODS = frozenset({"jina", "direct", "playwright"})  # hit the site itself
 
 
@@ -156,7 +158,10 @@ def fetch_via_jina(url: str, api_key: str | None = None) -> FetchResult:
     if response.status_code == 429:  # Jina's own throttling, not a site wall
         return FetchResult(blocked("error:jina_429"), method="jina", content_type=ctype)
     content = response.text
-    verdict = classify(response.status_code, ctype, content)
+    # Jina answers 200 for a page whose own fetch failed and says so in the body.
+    m = _JINA_TARGET_ERR.search(content)
+    status = int(m.group(1)) if m else response.status_code
+    verdict = classify(status, ctype, content)
     title = next((line[2:].strip() for line in content.splitlines() if line.startswith("# ")), "")
     return FetchResult(verdict, content if verdict.ok else "", title, "jina", ctype)
 
