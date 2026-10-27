@@ -41,6 +41,11 @@ class FakeResponse:
     def body(self):
         return self._body
 
+    disposed = False
+
+    def dispose(self):
+        self.disposed = True
+
 
 class FakePage:
     def __init__(self, htmls, response=None, goto_error=None, final_url=None):
@@ -161,6 +166,41 @@ def test_download_navigation_falls_back_to_request(tmp_path, fake_pdf):
     assert result.method == "pdf-local" and page.closed
 
 
+class AbortingPage(FakePage):
+    """goto raises net::ERR_ABORTED for the first `aborts` navigations, like a guard-aborted redirect."""
+
+    def __init__(self, htmls, aborts=1):
+        super().__init__(htmls)
+        self.aborts = aborts
+
+    def goto(self, url, timeout, wait_until):
+        self.visited.append(url)
+        self.url = url
+        if len(self.visited) <= self.aborts:
+            raise RuntimeError(f"Page.goto: net::ERR_ABORTED at {url}")
+        return self.response
+
+
+def test_guard_aborted_redirect_renavigates_once_to_the_final_url(tmp_path):
+    page = AbortingPage([ARTICLE_HTML])
+    session = _session(FakeContext(page))
+    session._last_nav_url["https://a.gov/r"] = "https://b.gov/final"
+    result = session.fetch("https://a.gov/r", tmp_path)
+    assert result.verdict.ok and page.visited == ["https://a.gov/r", "https://b.gov/final"]
+    assert session._last_nav_url == {}
+
+
+def test_second_guard_abort_is_not_followed_again(tmp_path):
+    page = AbortingPage([ARTICLE_HTML], aborts=2)
+    session = _session(FakeContext(page))
+    session._last_nav_url["https://a.gov/r"] = "https://b.gov/final"
+    session._last_nav_url["https://b.gov/final"] = "https://c.gov/again"
+    with pytest.raises(RuntimeError):
+        session.fetch("https://a.gov/r", tmp_path)
+    assert page.visited == ["https://a.gov/r", "https://b.gov/final"] and page.closed
+    assert session._last_nav_url == {}
+
+
 def test_pdf_403_is_blocked(tmp_path, fake_pdf):
     context = FakeContext(FakePage([""]), pdf_response=FakeResponse(403, {"content-type": "text/html"}))
     result = _session(context).fetch("https://a.gov/packet.pdf", tmp_path)
@@ -176,8 +216,10 @@ def _reject(monkeypatch, *needles):
 
 
 class FakeRoute:
-    def __init__(self, url, navigation=False, fetched=None):
-        self.request = types.SimpleNamespace(url=url, is_navigation_request=lambda: navigation)
+    def __init__(self, url, navigation=False, fetched=None, method="GET", post=None, main_frame=True):
+        self.request = types.SimpleNamespace(
+            url=url, is_navigation_request=lambda: navigation, method=method, post_data_buffer=post,
+            frame=types.SimpleNamespace(parent_frame=None if main_frame else object()))
         self.outcome = None
         self._fetched = fetched  # a response, a {url: response} dict, or an Exception
         self.fetch_calls = []
@@ -210,8 +252,9 @@ def test_navigation_redirect_to_internal_host_is_aborted_before_it_is_sent(monke
     route = FakeRoute("https://a.gov/r", navigation=True,
                       fetched=FakeResponse(302, {"location": "http://127.0.0.1:9/secret"}))
     session._guard(route)
-    assert route.fetch_calls == [{"url": "https://a.gov/r", "max_redirects": 0}]
-    assert route.outcome == "blockedbyclient"
+    assert [(c["url"], c["max_redirects"]) for c in route.fetch_calls] == [("https://a.gov/r", 0)]
+    assert route.outcome == "blockedbyclient" and route._fetched.disposed
+    assert session._last_nav_url == {}
 
 
 def test_two_hop_chain_to_internal_host_is_aborted_without_fetching_it(monkeypatch):
@@ -226,20 +269,64 @@ def test_two_hop_chain_to_internal_host_is_aborted_without_fetching_it(monkeypat
     assert route.outcome == "blockedbyclient"
 
 
-def test_two_hop_public_chain_fulfills_the_final_response(monkeypatch):
+def test_redirected_public_chain_is_aborted_and_the_final_url_recorded(monkeypatch):
     _reject(monkeypatch, "127.0.0.1")
     session = fetch_playwright.BrowserSession()
-    final = FakeResponse(200)
+    hops = [FakeResponse(302, {"location": "/r2"}), FakeResponse(302, {"location": "https://b.gov/page"}),
+            FakeResponse(200)]
     route = FakeRoute("https://a.gov/r1", navigation=True, fetched={
-        "https://a.gov/r1": FakeResponse(302, {"location": "/r2"}),
-        "https://a.gov/r2": FakeResponse(302, {"location": "https://b.gov/page"}),
-        "https://b.gov/page": final,
-    })
+        "https://a.gov/r1": hops[0], "https://a.gov/r2": hops[1], "https://b.gov/page": hops[2]})
     session._guard(route)
-    assert route.fetch_calls == [{"url": u, "max_redirects": 0} for u in (
-        "https://a.gov/r1", "https://a.gov/r2", "https://b.gov/page")]
-    assert route.outcome == ("fulfill", final)
-    assert session._last_nav_url["https://a.gov/r1"] == "https://b.gov/page"
+    assert [(c["url"], c["max_redirects"]) for c in route.fetch_calls] == [
+        (u, 0) for u in ("https://a.gov/r1", "https://a.gov/r2", "https://b.gov/page")]
+    # The page must run under the real URL, so the browser re-navigates to it.
+    assert route.outcome == "aborted"
+    assert session._last_nav_url == {"https://a.gov/r1": "https://b.gov/page"}
+    assert all(h.disposed for h in hops)
+
+
+def test_redirected_subframe_navigation_is_fulfilled_not_recorded(monkeypatch):
+    session = fetch_playwright.BrowserSession()
+    final = FakeResponse(200)
+    route = FakeRoute("https://a.gov/r", navigation=True, main_frame=False, fetched={
+        "https://a.gov/r": FakeResponse(302, {"location": "/f"}), "https://a.gov/f": final})
+    session._guard(route)
+    assert route.outcome == ("fulfill", final) and session._last_nav_url == {}
+
+
+def test_post_is_not_resent_after_a_redirect(monkeypatch):
+    session = fetch_playwright.BrowserSession()
+    route = FakeRoute("https://a.gov/form", navigation=True, method="POST", post=b"a=1", fetched={
+        "https://a.gov/form": FakeResponse(302, {"location": "/done"}), "https://a.gov/done": FakeResponse(200)})
+    session._guard(route)
+    assert [(c["method"], c["post_data"]) for c in route.fetch_calls] == [("POST", b"a=1"), ("GET", None)]
+
+
+def test_post_keeps_method_on_307_and_becomes_get_on_303(monkeypatch):
+    for status, expected in ((307, "POST"), (303, "GET")):
+        session = fetch_playwright.BrowserSession()
+        route = FakeRoute("https://a.gov/form", navigation=True, method="POST", post=b"a=1", fetched={
+            "https://a.gov/form": FakeResponse(status, {"location": "/done"}), "https://a.gov/done": FakeResponse(200)})
+        session._guard(route)
+        assert route.fetch_calls[1]["method"] == expected
+    get = FakeRoute("https://a.gov/g", navigation=True, fetched={
+        "https://a.gov/g": FakeResponse(303, {"location": "/h"}), "https://a.gov/h": FakeResponse(200)})
+    fetch_playwright.BrowserSession()._guard(get)
+    assert [c["method"] for c in get.fetch_calls] == ["GET", "GET"]
+
+
+def test_route_fetch_uses_a_shared_deadline(monkeypatch):
+    session = fetch_playwright.BrowserSession()
+    route = FakeRoute("https://a.gov/r", navigation=True, fetched={
+        "https://a.gov/r": FakeResponse(302, {"location": "/p"}), "https://a.gov/p": FakeResponse(200)})
+    session._guard(route)
+    timeouts = [c["timeout"] for c in route.fetch_calls]
+    assert all(1000 <= t <= fetch_playwright.NAV_TIMEOUT_MS for t in timeouts)
+    assert timeouts[1] <= timeouts[0]
+    monkeypatch.setattr(fetch_playwright, "NAV_TIMEOUT_MS", 0)
+    expired = FakeRoute("https://a.gov/p", navigation=True, fetched=FakeResponse(200))
+    session._guard(expired)
+    assert expired.outcome == "failed" and expired.fetch_calls == []
 
 
 def test_redirect_loop_is_aborted(monkeypatch):
@@ -262,7 +349,7 @@ def test_navigation_without_redirect_is_fulfilled(monkeypatch):
     page = FakeResponse(200)
     route = FakeRoute("https://a.gov/p", navigation=True, fetched=page)
     session._guard(route)
-    assert route.outcome == ("fulfill", page)
+    assert route.outcome == ("fulfill", page) and page.disposed and session._last_nav_url == {}
 
 
 def test_non_http_navigation_just_continues(monkeypatch):
@@ -393,8 +480,6 @@ def test_locked_profile_retries_in_a_temp_profile(tmp_path, monkeypatch):
 
 def test_browsers_live_in_the_repo_cache_unless_overridden(tmp_path, monkeypatch):
     _install_fake_playwright(monkeypatch, FakePlaywright([GuardedContext(), GuardedContext()]))
-    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "x")
-    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH")
     with fetch_playwright.BrowserSession(profile_dir=tmp_path / "p1"):
         assert Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"]) == fetch_playwright.BROWSERS_PATH
     assert fetch_playwright.BROWSERS_PATH.parts[-2:] == (".cache", "ms-playwright")
@@ -592,3 +677,44 @@ def test_real_browser_blocks_a_two_hop_redirect_chain_to_an_internal_host(tmp_pa
         server_a.shutdown()
         server_b.shutdown()
     assert hits == []
+
+
+@pytest.mark.browser
+def test_real_browser_redirected_page_runs_under_its_final_url(tmp_path, monkeypatch):
+    # After a redirect the page must live at the real URL, so relative resources resolve there.
+    _chromium_or_skip()
+    paths = []
+
+    class Site(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            paths.append(self.path)
+            if self.path == "/r":
+                self.send_response(302)
+                self.send_header("Location", "/sub/final")
+                self.end_headers()
+                return
+            if self.path == "/sub/final":
+                body = (f'<html><head><title>Final</title></head><body><p>{"Public page text. " * 20}</p>'
+                        '<script src="rel.js"></script></body></html>').encode()  # blocks DOMContentLoaded
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+            else:
+                body = b""
+                self.send_response(404)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Site)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(fetch_playwright, "validate_url", lambda url: None)
+    try:
+        with fetch_playwright.BrowserSession(profile_dir=tmp_path / "profile") as session:
+            assert session.available
+            result = session.fetch(f"http://localhost:{server.server_address[1]}/r", tmp_path / "cache")
+    finally:
+        server.shutdown()
+    assert result.verdict.ok and result.title == "Final"
+    assert "/sub/rel.js" in paths and "/rel.js" not in paths

@@ -26,5 +26,5 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "browser: drives a real Chromium (uv run --frozen playwright install chromium); skipped when it is missing",
+    "browser: drives a real Chromium (PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright uv run --frozen playwright install chromium); skipped when it is missing",
 ]

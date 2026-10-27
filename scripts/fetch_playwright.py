@@ -45,6 +45,13 @@ _REDIRECT_CODES = {301, 302, 303, 307, 308}
 _DOWNLOAD_ERRORS = ("Download is starting", "net::ERR_ABORTED")
 
 
+def _dispose(response) -> None:
+    try:
+        response.dispose()
+    except Exception:
+        pass
+
+
 class BrowserSession:
     """Context manager; check .available before calling fetch()."""
 
@@ -115,27 +122,46 @@ class BrowserSession:
 
     def _guard_navigation(self, route, url: str) -> None:
         """Walk the whole redirect chain here: Chromium does not route hops after a fulfilled
-        3xx, so every Location is checked before it is requested, then the final response is
-        handed to the page. The page keeps the original URL; the real one is in _last_nav_url."""
+        3xx, so every Location is checked before it is requested. A main-frame chain that
+        redirected is aborted with the final URL recorded in _last_nav_url, and _fetch
+        navigates to that URL so the page runs under its real origin; anything else is
+        fulfilled with the final response."""
+        request = route.request
+        method, post = request.method, request.post_data_buffer
+        deadline = time.monotonic() + NAV_TIMEOUT_MS / 1000
         current = url
         for _ in range(MAX_REDIRECTS + 1):
+            remaining_ms = (deadline - time.monotonic()) * 1000
+            if remaining_ms <= 0:
+                route.abort("failed")
+                return
             try:
-                response = route.fetch(url=current, max_redirects=0)
+                response = route.fetch(url=current, method=method, post_data=post,
+                                       max_redirects=0, timeout=max(1000, int(remaining_ms)))
             except Exception as exc:
                 print(f"[fetch_playwright] navigation fetch failed for {current}: {exc}", file=sys.stderr)
                 route.abort("failed")
                 return
             location = response.headers.get("location")
             if response.status in _REDIRECT_CODES and location:
+                status = response.status
+                _dispose(response)
                 target = urljoin(current, location)
                 if not self._allowed(target):
                     print(f"[fetch_playwright] blocked internal request: {target}", file=sys.stderr)
                     route.abort("blockedbyclient")
                     return
+                if status == 303 or (status in (301, 302) and method == "POST"):
+                    method, post = "GET", None
                 current = target
                 continue
-            self._last_nav_url[url] = current
-            route.fulfill(response=response)
+            if current != url and request.frame.parent_frame is None:
+                self._last_nav_url[url] = current
+                _dispose(response)
+                route.abort("aborted")
+            else:
+                route.fulfill(response=response)
+                _dispose(response)
             return
         route.abort("failed")  # redirect loop
 
@@ -170,15 +196,26 @@ class BrowserSession:
         if looks_like_pdf(url, ""):
             return self._fetch_pdf(url, cache_dir)
         page = self._context.new_page()
+        target = url
         try:
-            try:
-                response = page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
-            except Exception as exc:
-                if "ERR_BLOCKED_BY_CLIENT" in str(exc):
-                    raise UnsafeURLError(f"{url} redirected to an internal address") from exc
-                if any(marker in str(exc) for marker in _DOWNLOAD_ERRORS):
-                    return self._fetch_pdf(url, cache_dir)
-                raise
+            while True:
+                try:
+                    response = page.goto(target, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                    break
+                except Exception as exc:
+                    # The guard aborts a redirected chain and records where it ended: go there
+                    # once so the page runs under its real URL.
+                    final = self._last_nav_url.pop(target, None)
+                    if final and target == url:
+                        target = final
+                        continue
+                    if final:
+                        raise RuntimeError(f"{url} redirected again at {target}") from exc
+                    if "ERR_BLOCKED_BY_CLIENT" in str(exc):
+                        raise UnsafeURLError(f"{url} redirected to an internal address") from exc
+                    if any(marker in str(exc) for marker in _DOWNLOAD_ERRORS):
+                        return self._fetch_pdf(url, cache_dir)
+                    raise
             status = response.status if response else None
             ctype = response.headers.get("content-type", "") if response else ""
             if looks_like_pdf(url, ctype):
@@ -196,16 +233,15 @@ class BrowserSession:
                 text, title = html_to_text(html)
                 # The challenge's own 403/503 is stale once it clears: drop the status.
                 verdict = classify(None, ctype, text, html)
-            final_url = self._last_nav_url.pop(url, page.url)
-            for end in (final_url, page.url):
-                if end != url and not self._allowed(end):
-                    raise UnsafeURLError(f"{url} ended on internal address {end}")
+            if page.url != target and not self._allowed(page.url):
+                raise UnsafeURLError(f"{url} ended on internal address {page.url}")
             title = page.title() or title
             if not verdict.ok:
                 return FetchResult(verdict, method="playwright", content_type=ctype)
             return FetchResult(verdict, text, title, "playwright", ctype)
         finally:
             page.close()
+            self._last_nav_url.pop(url, None)
 
     def _get(self, url: str):
         """GET through the session, validating every redirect hop."""

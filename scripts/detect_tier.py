@@ -13,9 +13,6 @@ from pathlib import Path
 
 import requests
 
-import fetch_playwright
-import pdf_extract
-
 
 def check_ollama() -> dict:
     """Check if Ollama is installed and running."""
@@ -100,7 +97,11 @@ TESSERACT_INSTALL = "winget install UB-Mannheim.TesseractOCR"
 
 
 def check_playwright() -> dict:
-    """Playwright importable AND its Chromium build downloaded."""
+    """Playwright importable AND its Chromium build downloaded.
+
+    Sets PLAYWRIGHT_BROWSERS_PATH (repo-local cache) for the process unless already set."""
+    import fetch_playwright  # lazy: keeps pymupdf out of `import rw`
+
     fetch_playwright.use_repo_browsers()
     try:
         from playwright.sync_api import sync_playwright
@@ -118,6 +119,8 @@ def check_playwright() -> dict:
 
 def check_tesseract() -> dict:
     """Optional OCR for image-only PDFs. Never changes the tier."""
+    import pdf_extract  # lazy: keeps pymupdf out of `import rw`
+
     if shutil.which("tesseract") is not None or pdf_extract.tesseract_available():
         return {"status": "ok"}
     return {"status": "missing", "optional": True, "install": TESSERACT_INSTALL}
