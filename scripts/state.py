@@ -261,6 +261,21 @@ def add_seen_urls(state_dir: Path, topic_name: str, urls: list[str]) -> None:
     save_state(state_dir, run)
 
 
+def add_manual_url(state_dir: Path, url: str, reason: str, topic: str | None = None) -> None:
+    """List a URL for the user to read by hand (a CAPTCHA, or no browser tools).
+
+    Stage 10b prints run["manual_urls"]. Deduplicated by URL.
+    """
+    run = load_run(state_dir)
+    if run is None:
+        raise RuntimeError("No active run")
+    manual = run.setdefault("manual_urls", [])
+    if any(m["url"] == url for m in manual):
+        return
+    manual.append({"url": url, "reason": reason, "topic": topic})
+    save_state(state_dir, run)
+
+
 _RESERVED_DECISION_KEYS = {"decision", "at"}
 
 
@@ -598,6 +613,8 @@ def create_run(state_dir: Path, run_id: str, tier: str) -> dict:
         "replan_count": 0,
         "user_decisions": [],
         "applied_patterns": [],
+        "manual_urls": [],
+        "superseded": {},
     }
     _atomic_write(run_file, run)
     return run

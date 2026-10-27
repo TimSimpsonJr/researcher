@@ -41,6 +41,7 @@ from state import (
     LockTimeoutError,
     abandon_run,
     acquire_state_lock,
+    add_manual_url,
     add_seen_urls,
     aggregate_fetch_results,
     aggregate_hop_summaries,
@@ -300,6 +301,25 @@ def cmd_add_seen_urls(args):
     _out({"topic": args.topic})
 
 
+def cmd_add_browser_fetch(args):
+    sd = _state_dir(args)
+    results = sd / f"fetch_results_hop{args.hop}.json"
+    if not results.is_file():
+        raise CLIError(f"{results.name} not found; run fetch_and_clean.py for hop {args.hop} first")
+    # fetch_and_clean pulls in pymupdf/playwright; import it only for this command.
+    import fetch_and_clean
+    fetch_and_clean.validate_url(args.url)  # same SSRF guard as every other fetch
+    add_seen_urls(sd, topic_name=args.topic, urls=[args.url])  # validates the topic first
+    content = Path(args.content_file).read_text(encoding="utf-8")
+    record = fetch_and_clean.add_browser_fetch(results, args.url, args.title, content, Path(args.cache_dir or fetch_and_clean.DEFAULT_CACHE_DIR))
+    _out({"url": args.url, "hop": args.hop, "word_count": record["word_count"]})
+
+
+def cmd_add_manual_url(args):
+    add_manual_url(_state_dir(args), args.url, args.reason, args.topic)
+    _out({"url": args.url, "reason": args.reason})
+
+
 def cmd_apply_hop_decision(args):
     resp = _read_json(args.response_file)
     decision = args.decision or resp["decision"]
@@ -522,6 +542,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("add-seen-urls", cmd_add_seen_urls, "append fetched URLs to a topic's seen_urls")
     p.add_argument("--topic", required=True)
     p.add_argument("--urls", required=True, nargs="+")
+    p = add("add-browser-fetch", cmd_add_browser_fetch,
+            "record a page read in the orchestrator's browser into fetch_results_hop<N>.json")
+    p.add_argument("--hop", required=True)
+    p.add_argument("--topic", required=True)
+    p.add_argument("--url", required=True)
+    p.add_argument("--title", default="")
+    p.add_argument("--content-file", required=True)
+    p.add_argument("--cache-dir", help="fetch cache (default: the repo's .cache/fetch)")
+    p = add("add-manual-url", cmd_add_manual_url, "list a URL for the user to read by hand (Stage 10b)")
+    p.add_argument("--url", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--topic")
     p = add("apply-hop-decision", cmd_apply_hop_decision, "atomic Stage 4e hop transition")
     p.add_argument("--topic", required=True)
     p.add_argument("--response-file", required=True, help="the hop-planner JSON response")

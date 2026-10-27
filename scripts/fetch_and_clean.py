@@ -393,6 +393,32 @@ def process_urls(
     return fetched, failed, needs_browser
 
 
+def add_browser_fetch(results_path: Path, url: str, title: str, content: str, cache_dir: Path) -> dict:
+    """Record a page the orchestrator read in its own browser (SKILL Stage 4b).
+
+    Caches it with fetch_method "browser", appends it to the hop's fetched list,
+    drops the URL from needs_browser and failed, and refreshes stats.
+    """
+    data = json.loads(results_path.read_text(encoding="utf-8"))
+    entry = {
+        "url": url,
+        "title": title,
+        "content": content,
+        "fetch_method": "browser",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_cache(cache_dir, url_cache_key(url), entry)
+    record = _record(entry, cache_hit=False)
+    data["fetched"] = [f for f in data.get("fetched", []) if f["url"] != url] + [record]
+    for key in ("failed", "needs_browser"):
+        data[key] = [f for f in data.get(key, []) if f["url"] != url]
+    data["stats"] = {**data.get("stats", {}), **_stats(data["fetched"], data["failed"], data["needs_browser"])}
+    tmp = results_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(results_path)
+    return record
+
+
 # ──────────────────────────────────────────────
 # CLI entry point
 # ──────────────────────────────────────────────

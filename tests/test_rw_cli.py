@@ -422,6 +422,95 @@ def test_add_seen_urls_unknown_topic_fails(active_run, cli):
     assert code == 1 and "Topic not found" in err
 
 
+PDF_URL = "https://fdle.example/packet.pdf"
+
+
+def _needs_browser_results(vault):
+    return _write(_state(vault) / "fetch_results_hop1.json", {
+        "topic": "T", "fetched": [], "failed": [],
+        "needs_browser": [{"url": PDF_URL, "reason": "http_403", "attempts": []}],
+        "stats": {"total_urls": 1, "fetched": 0, "failed": 0, "needs_browser": 1,
+                  "cache_hits": 0, "total_words": 0},
+    })
+
+
+def test_add_browser_fetch_moves_url_out_of_needs_browser(active_run, cli, tmp_path):
+    import fetch_and_clean
+    results = _needs_browser_results(active_run)
+    page = active_run / "page.md"
+    page.write_text("Board package text. " * 30, encoding="utf-8")
+    cache = tmp_path / "cache"
+    code, out, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                         "--title", "Board package", "--content-file", page, "--cache-dir", cache)
+    assert code == 0, err
+    assert out == {"url": PDF_URL, "hop": "1", "word_count": 90}
+    data = json.loads(results.read_text(encoding="utf-8"))
+    assert [(f["url"], f["fetch_method"], f["title"]) for f in data["fetched"]] == [(PDF_URL, "browser", "Board package")]
+    assert data["needs_browser"] == []
+    assert data["stats"] == {"total_urls": 1, "fetched": 1, "failed": 0, "needs_browser": 0,
+                             "cache_hits": 0, "total_words": 90}
+    cached = fetch_and_clean.load_cache(cache, fetch_and_clean.url_cache_key(PDF_URL))
+    assert cached["fetch_method"] == "browser" and cached["content"].startswith("Board package text.")
+    assert PDF_URL in _run_file(active_run)["topics"][0]["seen_urls"]
+
+
+def test_add_browser_fetch_also_clears_failed(active_run, cli, tmp_path):
+    results = _needs_browser_results(active_run)
+    data = json.loads(results.read_text(encoding="utf-8"))
+    data["failed"] = [{"url": PDF_URL, "error": "x", "attempts": []}]
+    results.write_text(json.dumps(data), encoding="utf-8")
+    page = active_run / "page.md"
+    page.write_text("some text here", encoding="utf-8")
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                       "--content-file", page, "--cache-dir", tmp_path / "cache")
+    assert code == 0, err
+    data = json.loads(results.read_text(encoding="utf-8"))
+    assert data["failed"] == [] and data["stats"]["failed"] == 0 and data["stats"]["fetched"] == 1
+
+
+def test_add_browser_fetch_rejects_internal_url(active_run, cli, tmp_path):
+    results = _needs_browser_results(active_run)
+    before = results.read_text(encoding="utf-8")
+    page = active_run / "page.md"
+    page.write_text("x", encoding="utf-8")
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR",
+                       "--url", "http://127.0.0.1/admin", "--content-file", page, "--cache-dir", tmp_path / "cache")
+    assert code == 1 and err.startswith("ERROR:") and "Blocked" in err
+    assert results.read_text(encoding="utf-8") == before
+
+
+def test_add_browser_fetch_needs_the_hop_file(active_run, cli, tmp_path):
+    page = active_run / "page.md"
+    page.write_text("x", encoding="utf-8")
+    code, _, err = cli("add-browser-fetch", "--hop", "9", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                       "--content-file", page, "--cache-dir", tmp_path / "cache")
+    assert code == 1 and "fetch_results_hop9.json not found" in err
+
+
+def test_add_browser_fetch_unknown_topic_leaves_file_alone(active_run, cli, tmp_path):
+    results = _needs_browser_results(active_run)
+    before = results.read_text(encoding="utf-8")
+    page = active_run / "page.md"
+    page.write_text("x", encoding="utf-8")
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Nope", "--url", PDF_URL,
+                       "--content-file", page, "--cache-dir", tmp_path / "cache")
+    assert code == 1 and "Topic not found" in err
+    assert results.read_text(encoding="utf-8") == before
+
+
+def test_add_manual_url_dedupes(active_run, cli):
+    code, out, _ = cli("add-manual-url", "--url", PDF_URL, "--reason", "captcha", "--topic", "Greenville ALPR")
+    assert code == 0 and out == {"url": PDF_URL, "reason": "captcha"}
+    cli("add-manual-url", "--url", PDF_URL, "--reason", "captcha")
+    assert _run_file(active_run)["manual_urls"] == [
+        {"url": PDF_URL, "reason": "captcha", "topic": "Greenville ALPR"}]
+
+
+def test_add_manual_url_without_run_fails(vault, cli):
+    code, _, err = cli("add-manual-url", "--url", PDF_URL, "--reason", "captcha")
+    assert code == 1 and "No active run" in err
+
+
 HOP_RESPONSE = {
     "topic": "Greenville ALPR",
     "decision": "continue",

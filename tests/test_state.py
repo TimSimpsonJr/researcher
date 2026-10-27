@@ -702,3 +702,19 @@ def test_acquire_state_lock_releases_on_exception(tmp_path):
     # Next acquirer can take the lock cleanly
     with acquire_state_lock(tmp_path, timeout_s=1):
         pass
+
+
+def test_create_run_starts_manual_and_superseded_empty(tmp_path):
+    from state import create_run
+    run = create_run(tmp_path, "r1", "base")
+    assert run["manual_urls"] == [] and run["superseded"] == {}
+
+
+def test_add_manual_url_on_a_resumed_run_without_the_field(tmp_path):
+    from state import add_manual_url, create_run, load_run, save_state
+    run = create_run(tmp_path, "r1", "base")
+    del run["manual_urls"]
+    save_state(tmp_path, run)
+    add_manual_url(tmp_path, "https://a.example/x", "no_browser")
+    assert load_run(tmp_path)["manual_urls"] == [
+        {"url": "https://a.example/x", "reason": "no_browser", "topic": None}]
