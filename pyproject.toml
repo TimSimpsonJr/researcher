@@ -9,6 +9,7 @@ dependencies = [
     "python-docx",
     "rich",
     "PyYAML",
+    "playwright>=1.48,<1.64",
 ]
 # Optional full-tier tools (yt-dlp, openai-whisper) stay outside this lock;
 # /researcher-setup installs them with `uv tool install`.

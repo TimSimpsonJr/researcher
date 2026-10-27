@@ -166,6 +166,13 @@ def test_check_dispatches_by_component(cli, monkeypatch):
     assert set(cli("check", "platform")[1]) == {"os", "arch", "is_wsl"}
 
 
+def test_check_playwright_and_tesseract(cli, monkeypatch):
+    monkeypatch.setattr(rw, "check_playwright", lambda: {"status": "ok"})
+    monkeypatch.setattr(rw, "check_tesseract", lambda: {"status": "missing"})
+    assert cli("check", "playwright")[1] == {"status": "ok"}
+    assert cli("check", "tesseract")[1] == {"status": "missing"}
+
+
 def test_recommend_model(cli):
     out = cli("recommend-model", "--ram-gb", "32", "--vram-gb", "16")[1]
     assert out["model"] == "qwen2.5:14b"

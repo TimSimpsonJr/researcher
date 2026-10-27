@@ -94,16 +94,74 @@ def test_detect_tier_full():
     assert tier == "full"
 
 
+def _fake_playwright(monkeypatch, exe_path):
+    import types
+    sync_api = types.ModuleType("playwright.sync_api")
+
+    class _Manager:
+        chromium = types.SimpleNamespace(executable_path=str(exe_path))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    sync_api.sync_playwright = lambda: _Manager()
+    package = types.ModuleType("playwright")
+    package.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+
+
 def test_playwright_detection_when_unavailable(monkeypatch):
     from detect_tier import check_playwright
     monkeypatch.setitem(sys.modules, "playwright", None)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
     result = check_playwright()
-    assert result["status"] in {"missing", "error"}
+    assert result["status"] == "missing" and "not installed" in result["reason"]
 
 
-def test_playwright_detection_when_available(monkeypatch):
+def test_playwright_detection_needs_chromium(monkeypatch, tmp_path):
     from detect_tier import check_playwright
-    fake_module = type(sys)("playwright")
-    monkeypatch.setitem(sys.modules, "playwright", fake_module)
+    _fake_playwright(monkeypatch, tmp_path / "chrome.exe")
     result = check_playwright()
-    assert result["status"] == "ok"
+    assert result["status"] == "missing" and "playwright install chromium" in result["install"]
+
+
+def test_playwright_detection_when_available(monkeypatch, tmp_path):
+    from detect_tier import check_playwright
+    exe = tmp_path / "chrome.exe"
+    exe.write_bytes(b"")
+    _fake_playwright(monkeypatch, exe)
+    assert check_playwright() == {"status": "ok", "executable": str(exe)}
+
+
+def test_check_tesseract(monkeypatch):
+    import detect_tier
+    import pdf_extract
+    monkeypatch.setattr(detect_tier.shutil, "which", lambda name: None)
+    monkeypatch.setattr(pdf_extract, "tesseract_available", lambda: False)
+    result = detect_tier.check_tesseract()
+    assert result == {"status": "missing", "optional": True,
+                      "install": "winget install UB-Mannheim.TesseractOCR"}
+    monkeypatch.setattr(pdf_extract, "tesseract_available", lambda: True)
+    assert detect_tier.check_tesseract() == {"status": "ok"}
+    monkeypatch.setattr(pdf_extract, "tesseract_available", lambda: False)
+    monkeypatch.setattr(detect_tier.shutil, "which", lambda name: "C:/Program Files/Tesseract-OCR/tesseract.exe")
+    assert detect_tier.check_tesseract() == {"status": "ok"}
+
+
+def test_tier_report_lists_tesseract_without_changing_tier(monkeypatch):
+    import detect_tier
+    monkeypatch.setattr(detect_tier, "check_ollama", lambda: {"installed": False, "running": False})
+    monkeypatch.setattr(detect_tier, "ensure_searxng", lambda url, root: {"available": False, "url": None})
+    monkeypatch.setattr(detect_tier, "check_ytdlp", lambda: {"installed": False})
+    monkeypatch.setattr(detect_tier, "check_whisper", lambda: {"installed": False})
+    monkeypatch.setattr(detect_tier, "check_playwright", lambda: {"status": "ok"})
+    monkeypatch.setattr(detect_tier, "check_tesseract", lambda: {"status": "missing", "optional": True})
+    report = detect_tier.build_tier_report(None)
+    assert report["components"]["tesseract"]["status"] == "missing"
+    assert report["components"]["playwright"]["status"] == "ok"
+    assert report["tier"] == "base"
+    assert not any("esseract" in m for m in report["missing_for_full"])

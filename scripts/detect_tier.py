@@ -13,6 +13,8 @@ from pathlib import Path
 
 import requests
 
+import pdf_extract
+
 
 def check_ollama() -> dict:
     """Check if Ollama is installed and running."""
@@ -91,13 +93,31 @@ def check_whisper() -> dict:
         return {"installed": False, "backend": None}
 
 
+PLAYWRIGHT_INSTALL = 'uv run --frozen --project "<plugin root>" playwright install chromium'
+TESSERACT_INSTALL = "winget install UB-Mannheim.TesseractOCR"
+
+
 def check_playwright() -> dict:
-    """Detect whether Playwright is available for JS-heavy page extraction."""
+    """Playwright importable AND its Chromium build downloaded."""
     try:
-        import playwright  # noqa: F401
-        return {"status": "ok"}
+        from playwright.sync_api import sync_playwright
     except ImportError:
         return {"status": "missing", "reason": "playwright package not installed"}
+    try:
+        with sync_playwright() as p:
+            exe = Path(p.chromium.executable_path)
+    except Exception as e:
+        return {"status": "error", "reason": f"playwright failed to start: {e}"}
+    if not exe.exists():
+        return {"status": "missing", "reason": "Chromium not downloaded", "install": PLAYWRIGHT_INSTALL}
+    return {"status": "ok", "executable": str(exe)}
+
+
+def check_tesseract() -> dict:
+    """Optional OCR for image-only PDFs. Never changes the tier."""
+    if shutil.which("tesseract") is not None or pdf_extract.tesseract_available():
+        return {"status": "ok"}
+    return {"status": "missing", "optional": True, "install": TESSERACT_INSTALL}
 
 
 def get_platform_info() -> dict:
@@ -265,6 +285,7 @@ def build_tier_report(searxng_url: str | None, repo_root: Path | None = None) ->
         "ytdlp": {"status": "ok" if ytdlp.get("installed") else "missing"},
         "whisper": {"status": "ok" if whisper.get("installed") else "missing"},
         "playwright": check_playwright(),
+        "tesseract": check_tesseract(),
     }
 
     if ollama.get("running") and ollama.get("models"):

@@ -27,7 +27,9 @@ from detect_tier import (
     benchmark_ollama,
     build_tier_report,
     check_ollama,
+    check_playwright,
     check_searxng,
+    check_tesseract,
     check_whisper,
     check_ytdlp,
     detect_tier,
@@ -169,6 +171,8 @@ def cmd_check(args):
         "ollama": check_ollama,
         "ytdlp": check_ytdlp,
         "whisper": check_whisper,
+        "playwright": check_playwright,
+        "tesseract": check_tesseract,
         "platform": get_platform_info,
     }
     _out(checks[args.component]())
@@ -478,7 +482,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("detect-tier", cmd_detect_tier, "highest available tier, no auto-start")
     p.add_argument("--searxng-url")
     p = add("check", cmd_check, "check one component")
-    p.add_argument("component", choices=["ollama", "ytdlp", "whisper", "searxng", "platform"])
+    p.add_argument("component", choices=["ollama", "ytdlp", "whisper", "searxng", "platform",
+                                         "playwright", "tesseract"])
     p.add_argument("--url", help="SearXNG URL (for: check searxng)")
     add("hardware-info", cmd_hardware_info, "total RAM and GPU VRAM in GB")
     p = add("recommend-model", cmd_recommend_model, "Ollama model for this hardware")
