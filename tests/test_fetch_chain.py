@@ -128,6 +128,72 @@ def test_fetch_pdf_direct(monkeypatch, tmp_path):
     assert r.method == "pdf-local" and r.content == "%PDF-1.7 bytes"
 
 
+def test_fetch_via_jina_no_heading_gives_empty_title(monkeypatch):
+    monkeypatch.setattr(fetch_and_clean.requests, "get", lambda *a, **k: _resp(200, BODY))
+    r = fetch_and_clean.fetch_via_jina("https://a.example/x")
+    assert r.verdict.ok and r.title == ""
+
+
+def test_pdf_redirect_to_internal_host_is_unsafe_and_failed(monkeypatch, tmp_path):
+    import url_safety
+    validated, seen = [], []
+
+    def validate(url):
+        validated.append(url)
+        url_safety.validate_url(url)
+
+    replies = iter([
+        _resp(302, headers={"Location": "/moved/p.pdf"}),
+        _resp(302, headers={"Location": "http://127.0.0.1/x.pdf"}),
+    ])
+
+    def get(url, **kw):
+        seen.append(kw)
+        return next(replies)
+
+    start = "https://93.184.216.34/p.pdf"
+    monkeypatch.setattr(fetch_and_clean, "validate_url", validate)
+    monkeypatch.setattr(fetch_and_clean.requests, "get", get)
+    monkeypatch.setattr(fetch_and_clean, "fetch_via_jina", lambda url, key=None: bad("blocked", "cloudflare"))
+    monkeypatch.setattr(fetch_and_clean, "BrowserSession", lambda: FakeSession(ok("playwright")))
+    fetched, failed, needs_browser = fetch_and_clean.process_urls([{"url": start}], tmp_path, 7, None)
+    assert fetched == [] and needs_browser == [] and [f["url"] for f in failed] == [start]
+    assert att("direct", "unsafe", "ssrf") in failed[0]["attempts"]
+    assert seen and all(kw["allow_redirects"] is False for kw in seen)
+    assert validated[-3:] == [start, "https://93.184.216.34/moved/p.pdf", "http://127.0.0.1/x.pdf"]
+
+
+def test_pdf_too_many_redirects(monkeypatch):
+    monkeypatch.setattr(fetch_and_clean.requests, "get",
+                        lambda *a, **k: _resp(302, headers={"Location": "/again"}))
+    with pytest.raises(RuntimeError, match="too many redirects"):
+        fetch_and_clean.fetch_pdf_direct("https://a.example/p.pdf", None)
+
+
+def test_wayback_throttle_after_jina_error_is_failed(monkeypatch, tmp_path):
+    url = "https://a.example/x"
+    _first(monkeypatch, {url: bad("blocked", "error:ConnectionError")})
+    monkeypatch.setattr(fetch_and_clean, "BrowserSession", lambda: FakeSession(bad("thin", "0_chars", "playwright")))
+    monkeypatch.setattr(fetch_and_clean.wayback, "fetch",
+                        lambda u, c: bad("blocked", "http_429", "wayback"))
+    _, failed, needs_browser = fetch_and_clean.process_urls([{"url": url}], tmp_path, 7, None)
+    assert needs_browser == [] and [f["url"] for f in failed] == [url]
+
+
+def test_jina_timeout_and_no_snapshot_is_failed(monkeypatch, tmp_path):
+    url = "https://a.example/x"
+
+    def boom(u, key=None):
+        raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(fetch_and_clean, "fetch_via_jina", boom)
+    monkeypatch.setattr(fetch_and_clean, "BrowserSession", lambda: FakeSession(bad("missing", "http_404", "playwright")))
+    monkeypatch.setattr(fetch_and_clean.wayback, "fetch",
+                        lambda u, c: bad("missing", "no_snapshot", "wayback"))
+    _, failed, needs_browser = fetch_and_clean.process_urls([{"url": url}], tmp_path, 7, None)
+    assert needs_browser == [] and [f["url"] for f in failed] == [url]
+
+
 # ── fetch_url ordering and attempts ───────────
 
 def test_jina_ok_stops_there(chain, tmp_path):

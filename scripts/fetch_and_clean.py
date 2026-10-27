@@ -27,6 +27,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 
@@ -45,7 +46,9 @@ DEFAULT_TTL_DAYS = 7
 DEFAULT_FETCH_DELAY = 1.0  # seconds between phase-1 fetches (serial path)
 MAX_CONTENT_CHARS = 50_000
 JINA_BASE_URL = "https://r.jina.ai"
-LIVE_METHODS = frozenset({"jina", "direct", "playwright"})  # hit the site itself
+MAX_REDIRECTS = 5
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+LIVE_METHODS =frozenset({"jina", "direct", "playwright"})  # hit the site itself
 
 
 # ──────────────────────────────────────────────
@@ -156,10 +159,21 @@ def fetch_via_jina(url: str, api_key: str | None = None) -> FetchResult:
     return FetchResult(verdict, content if verdict.ok else "", title, "jina", ctype)
 
 
+def _get_validated(url: str):
+    """GET following redirects by hand so every hop passes the SSRF guard."""
+    for _ in range(MAX_REDIRECTS + 1):
+        validate_url(url)
+        response = requests.get(url, timeout=(10, 60), allow_redirects=False)
+        location = response.headers.get("Location")
+        if response.status_code not in _REDIRECT_CODES or not location:
+            return response
+        url = urljoin(url, location)
+    raise RuntimeError(f"too many redirects: {url}")
+
+
 def fetch_pdf_direct(url: str, cache_dir: Path) -> FetchResult:
     """GET a PDF's bytes ourselves and extract locally (pdf_extract)."""
-    validate_url(url)
-    response = requests.get(url, timeout=60)
+    response = _get_validated(url)
     ctype = response.headers.get("Content-Type", "")
     if response.status_code != 200:
         return FetchResult(classify(response.status_code, ctype, ""), method="direct", content_type=ctype)
