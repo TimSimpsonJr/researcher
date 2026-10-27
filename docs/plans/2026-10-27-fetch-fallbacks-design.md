@@ -83,7 +83,7 @@ The cache stores the same fields, so cache hits keep `image_only_pdf` and `pdf_p
 ### Setup and tier detection
 
 - `pyproject.toml` adds `playwright`, re-locked with `uv lock`, subject to the 72-hour package-age gate.
-- `/researcher-setup` runs `uv run --frozen --project "REPO" playwright install chromium` after `uv sync --frozen`.
+- `/researcher-setup` runs `PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" uv run --frozen --project "REPO" playwright install chromium` after `uv sync --frozen`. Browsers live in the repo cache, not `%LOCALAPPDATA%`: under the Claude desktop (MSIX) app that path is virtualized and full Chromium cannot be spawned from it. `fetch_playwright` and `check_playwright` default `PLAYWRIGHT_BROWSERS_PATH` to the same directory.
 - `detect_tier.check_playwright` confirms the Chromium executable exists, not just the import.
 - New `check_tesseract` (`shutil.which("tesseract")` or PyMuPDF's tessdata lookup) reports present or missing, with the install line `winget install UB-Mannheim.TesseractOCR`. Optional; it does not change the tier.
 

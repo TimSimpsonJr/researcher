@@ -179,8 +179,12 @@ class FakeRoute:
     def __init__(self, url, navigation=False, fetched=None):
         self.request = types.SimpleNamespace(url=url, is_navigation_request=lambda: navigation)
         self.outcome = None
-        self._fetched = fetched
-        self.fetch_args = None
+        self._fetched = fetched  # a response, a {url: response} dict, or an Exception
+        self.fetch_calls = []
+
+    @property
+    def fetch_args(self):
+        return self.fetch_calls[-1] if self.fetch_calls else None
 
     def continue_(self):
         self.outcome = "continue"
@@ -189,7 +193,11 @@ class FakeRoute:
         self.outcome = code
 
     def fetch(self, **kwargs):
-        self.fetch_args = kwargs
+        self.fetch_calls.append(kwargs)
+        if isinstance(self._fetched, Exception):
+            raise self._fetched
+        if isinstance(self._fetched, dict):
+            return self._fetched[kwargs["url"]]
         return self._fetched
 
     def fulfill(self, response=None):
@@ -202,17 +210,51 @@ def test_navigation_redirect_to_internal_host_is_aborted_before_it_is_sent(monke
     route = FakeRoute("https://a.gov/r", navigation=True,
                       fetched=FakeResponse(302, {"location": "http://127.0.0.1:9/secret"}))
     session._guard(route)
-    assert route.fetch_args == {"max_redirects": 0}
+    assert route.fetch_calls == [{"url": "https://a.gov/r", "max_redirects": 0}]
     assert route.outcome == "blockedbyclient"
 
 
-def test_navigation_redirect_to_public_host_is_fulfilled(monkeypatch):
+def test_two_hop_chain_to_internal_host_is_aborted_without_fetching_it(monkeypatch):
     _reject(monkeypatch, "127.0.0.1")
     session = fetch_playwright.BrowserSession()
-    redirect = FakeResponse(302, {"location": "/next"})
-    route = FakeRoute("https://a.gov/r", navigation=True, fetched=redirect)
+    route = FakeRoute("https://a.gov/r1", navigation=True, fetched={
+        "https://a.gov/r1": FakeResponse(302, {"location": "/r2"}),
+        "https://a.gov/r2": FakeResponse(301, {"location": "http://127.0.0.1:9/secret"}),
+    })
     session._guard(route)
-    assert route.outcome == ("fulfill", redirect)
+    assert [c["url"] for c in route.fetch_calls] == ["https://a.gov/r1", "https://a.gov/r2"]
+    assert route.outcome == "blockedbyclient"
+
+
+def test_two_hop_public_chain_fulfills_the_final_response(monkeypatch):
+    _reject(monkeypatch, "127.0.0.1")
+    session = fetch_playwright.BrowserSession()
+    final = FakeResponse(200)
+    route = FakeRoute("https://a.gov/r1", navigation=True, fetched={
+        "https://a.gov/r1": FakeResponse(302, {"location": "/r2"}),
+        "https://a.gov/r2": FakeResponse(302, {"location": "https://b.gov/page"}),
+        "https://b.gov/page": final,
+    })
+    session._guard(route)
+    assert route.fetch_calls == [{"url": u, "max_redirects": 0} for u in (
+        "https://a.gov/r1", "https://a.gov/r2", "https://b.gov/page")]
+    assert route.outcome == ("fulfill", final)
+    assert session._last_nav_url["https://a.gov/r1"] == "https://b.gov/page"
+
+
+def test_redirect_loop_is_aborted(monkeypatch):
+    session = fetch_playwright.BrowserSession()
+    route = FakeRoute("https://a.gov/r", navigation=True,
+                      fetched=FakeResponse(302, {"location": "/r"}))
+    session._guard(route)
+    assert route.outcome == "failed" and len(route.fetch_calls) == fetch_playwright.MAX_REDIRECTS + 1
+
+
+def test_route_fetch_error_aborts_the_navigation(monkeypatch):
+    session = fetch_playwright.BrowserSession()
+    route = FakeRoute("https://a.gov/p", navigation=True, fetched=RuntimeError("connection refused"))
+    session._guard(route)
+    assert route.outcome == "failed"
 
 
 def test_navigation_without_redirect_is_fulfilled(monkeypatch):
@@ -390,6 +432,7 @@ def test_no_stealth_or_user_agent_override():
 
 
 def _chromium_or_skip():
+    fetch_playwright.use_repo_browsers()
     sync_api = pytest.importorskip("playwright.sync_api")
     try:
         with sync_api.sync_playwright() as p:
@@ -397,7 +440,8 @@ def _chromium_or_skip():
     except Exception as exc:
         pytest.skip(f"playwright unusable: {exc}")
     if not exe.exists():
-        pytest.skip("Chromium not installed (uv run --frozen playwright install chromium)")
+        pytest.skip("Chromium not installed (PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright "
+                    "uv run --frozen playwright install chromium)")
 
 
 @pytest.mark.browser
@@ -496,4 +540,55 @@ def test_real_browser_blocks_subrequests_and_redirects_to_internal_hosts(tmp_pat
     # navigation redirect hops on its own (B used to receive the redirected GET). _guard now
     # fetches navigations with max_redirects=0 and checks each Location before fulfilling,
     # so B gets no hit at all.
+    assert hits == []
+
+
+@pytest.mark.browser
+def test_real_browser_blocks_a_two_hop_redirect_chain_to_an_internal_host(tmp_path, monkeypatch):
+    # Chromium follows a fulfilled 3xx without routing the next hop, so _guard walks the whole
+    # chain itself: localhost:A/r1 -> localhost:A/r2 -> 127.0.0.1:B/secret must never reach B.
+    _chromium_or_skip()
+    hits = []
+
+    class B(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"x")
+
+        def log_message(self, *args):
+            pass
+
+    server_b = http.server.ThreadingHTTPServer(("127.0.0.1", 0), B)
+    port_b = server_b.server_address[1]
+
+    class A(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            location = {"/r1": "/r2", "/r2": f"http://127.0.0.1:{port_b}/secret"}[self.path]
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server_a = http.server.ThreadingHTTPServer(("127.0.0.1", 0), A)
+    port_a = server_a.server_address[1]
+    for s in (server_a, server_b):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+
+    def check(url):
+        if urlparse(url).hostname == "127.0.0.1":
+            raise UnsafeURLError(url)
+
+    monkeypatch.setattr(fetch_playwright, "validate_url", check)
+    try:
+        with fetch_playwright.BrowserSession(profile_dir=tmp_path / "profile") as session:
+            assert session.available
+            with pytest.raises(UnsafeURLError):
+                session.fetch(f"http://localhost:{port_a}/r1", tmp_path / "cache")
+    finally:
+        server_a.shutdown()
+        server_b.shutdown()
     assert hits == []

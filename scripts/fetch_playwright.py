@@ -56,6 +56,7 @@ class BrowserSession:
         self._context = None
         self._tmp_profile = None
         self._host_ok: dict[tuple[str, str], bool] = {}
+        self._last_nav_url: dict[str, str] = {}
 
     def __enter__(self):
         use_repo_browsers()
@@ -105,22 +106,38 @@ class BrowserSession:
         url = route.request.url
         if self._allowed(url):
             if route.request.is_navigation_request() and urlparse(url).scheme in ("http", "https"):
-                # context.route never sees navigation redirect hops, so follow them here:
-                # fetch without redirects, check the target, then hand the 3xx to the browser.
-                response = route.fetch(max_redirects=0)
-                location = response.headers.get("location")
-                if response.status in _REDIRECT_CODES and location:
-                    target = urljoin(url, location)
-                    if not self._allowed(target):
-                        print(f"[fetch_playwright] blocked internal request: {target}", file=sys.stderr)
-                        route.abort("blockedbyclient")
-                        return
-                route.fulfill(response=response)
+                self._guard_navigation(route, url)
             else:
                 route.continue_()
         else:
             print(f"[fetch_playwright] blocked internal request: {url}", file=sys.stderr)
             route.abort("blockedbyclient")
+
+    def _guard_navigation(self, route, url: str) -> None:
+        """Walk the whole redirect chain here: Chromium does not route hops after a fulfilled
+        3xx, so every Location is checked before it is requested, then the final response is
+        handed to the page. The page keeps the original URL; the real one is in _last_nav_url."""
+        current = url
+        for _ in range(MAX_REDIRECTS + 1):
+            try:
+                response = route.fetch(url=current, max_redirects=0)
+            except Exception as exc:
+                print(f"[fetch_playwright] navigation fetch failed for {current}: {exc}", file=sys.stderr)
+                route.abort("failed")
+                return
+            location = response.headers.get("location")
+            if response.status in _REDIRECT_CODES and location:
+                target = urljoin(current, location)
+                if not self._allowed(target):
+                    print(f"[fetch_playwright] blocked internal request: {target}", file=sys.stderr)
+                    route.abort("blockedbyclient")
+                    return
+                current = target
+                continue
+            self._last_nav_url[url] = current
+            route.fulfill(response=response)
+            return
+        route.abort("failed")  # redirect loop
 
     def __exit__(self, *exc_info):
         self.close()
@@ -179,8 +196,10 @@ class BrowserSession:
                 text, title = html_to_text(html)
                 # The challenge's own 403/503 is stale once it clears: drop the status.
                 verdict = classify(None, ctype, text, html)
-            if page.url != url and not self._allowed(page.url):
-                raise UnsafeURLError(f"{url} ended on internal address {page.url}")
+            final_url = self._last_nav_url.pop(url, page.url)
+            for end in (final_url, page.url):
+                if end != url and not self._allowed(end):
+                    raise UnsafeURLError(f"{url} ended on internal address {end}")
             title = page.title() or title
             if not verdict.ok:
                 return FetchResult(verdict, method="playwright", content_type=ctype)
