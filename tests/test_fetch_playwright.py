@@ -491,13 +491,45 @@ class FakePlaywright:
 class GuardedContext:
     def __init__(self):
         self.routes = []
+        self.ws_routes = []
         self.closed = False
 
     def route(self, pattern, handler):
         self.routes.append((pattern, handler))
 
+    def route_web_socket(self, pattern, handler):
+        self.ws_routes.append((pattern, handler))
+
     def close(self):
         self.closed = True
+
+
+class FakeWebSocket:
+    def __init__(self, url):
+        self.url = url
+        self.connected = self.closed = False
+
+    def connect_to_server(self):
+        self.connected = True
+
+    def close(self):
+        self.closed = True
+
+
+def test_websockets_pass_the_ssrf_guard(tmp_path, monkeypatch):
+    import url_safety
+    monkeypatch.setattr(fetch_playwright, "validate_url", url_safety.validate_url)
+    ctx = GuardedContext()
+    _install_fake_playwright(monkeypatch, FakePlaywright([ctx]))
+    with fetch_playwright.BrowserSession(profile_dir=tmp_path / "profile"):
+        assert len(ctx.ws_routes) == 1
+        handler = ctx.ws_routes[0][1]
+        public = FakeWebSocket("wss://93.184.216.34/feed")
+        handler(public)
+        internal = FakeWebSocket("ws://127.0.0.1:9222/devtools")
+        handler(internal)
+    assert public.connected and not public.closed
+    assert internal.closed and not internal.connected
 
 
 def _install_fake_playwright(monkeypatch, fake):

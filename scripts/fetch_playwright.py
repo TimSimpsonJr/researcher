@@ -14,6 +14,7 @@ Uses Playwright's sync API: one session, one thread.
 """
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -85,6 +86,7 @@ class BrowserSession:
                 self._context = self._launch(self._tmp_profile)
             # Every request, including redirects and subresources, passes the SSRF guard.
             self._context.route("**/*", self._guard)
+            self._context.route_web_socket(re.compile(r".*"), self._guard_websocket)  # route() skips websockets
             self.available = True
         except Exception as exc:  # e.g. Chromium not downloaded yet
             print(f"[fetch_playwright] browser unavailable: {exc}", file=sys.stderr)
@@ -109,6 +111,14 @@ class BrowserSession:
             except UnsafeURLError:
                 self._host_ok[key] = False
         return self._host_ok[key]
+
+    def _guard_websocket(self, ws) -> None:
+        url = ws.url
+        if self._allowed(re.sub(r"^ws", "http", url, count=1)):  # ws: -> http:, wss: -> https:
+            ws.connect_to_server()
+        else:
+            print(f"[fetch_playwright] blocked internal websocket: {url}", file=sys.stderr)
+            ws.close()
 
     def _guard(self, route) -> None:
         url = route.request.url
