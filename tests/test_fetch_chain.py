@@ -9,9 +9,11 @@ from unittest.mock import MagicMock
 import pytest
 
 import fetch_and_clean
+import url_safety
 from block_detect import FetchResult, Verdict, blocked
 from url_safety import UnsafeURLError
 
+REAL_VALIDATE = url_safety.validate_url
 BODY = "Real article text about the camera contract. " * 10
 
 
@@ -59,6 +61,7 @@ def _resp(status=200, text="", headers=None, content=b""):
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     monkeypatch.setattr(fetch_and_clean, "validate_url", lambda url: None)
+    monkeypatch.setattr(url_safety, "validate_url", lambda url: None)  # per-hop checks in get_validated
 
 
 @pytest.fixture
@@ -155,12 +158,12 @@ def test_fetch_via_jina_no_heading_gives_empty_title(monkeypatch):
 
 
 def test_pdf_redirect_to_internal_host_is_unsafe_and_failed(monkeypatch, tmp_path):
-    import url_safety
     validated, seen = [], []
+    real_validate = REAL_VALIDATE
 
     def validate(url):
         validated.append(url)
-        url_safety.validate_url(url)
+        real_validate(url)
 
     replies = iter([
         _resp(302, headers={"Location": "/moved/p.pdf"}),
@@ -172,7 +175,7 @@ def test_pdf_redirect_to_internal_host_is_unsafe_and_failed(monkeypatch, tmp_pat
         return next(replies)
 
     start = "https://93.184.216.34/p.pdf"
-    monkeypatch.setattr(fetch_and_clean, "validate_url", validate)
+    monkeypatch.setattr(url_safety, "validate_url", validate)
     monkeypatch.setattr(fetch_and_clean.requests, "get", get)
     monkeypatch.setattr(fetch_and_clean, "fetch_via_jina", lambda url, key=None: bad("blocked", "cloudflare"))
     monkeypatch.setattr(fetch_and_clean, "BrowserSession", lambda: FakeSession(ok("playwright")))

@@ -6,9 +6,12 @@ import it without a circular import. fetch_and_clean re-exports validate_url.
 
 import socket
 from ipaddress import ip_address
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+
+import requests
 
 _BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain"}
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
 
 class UnsafeURLError(ValueError):
@@ -43,3 +46,18 @@ def validate_url(url: str) -> None:
         addr = ip_address(sockaddr[0])
         if _is_internal(addr):
             raise UnsafeURLError(f"Blocked: '{hostname}' resolves to private IP {addr}: {url}")
+
+
+def get_validated(url: str, *, timeout, max_redirects: int = 5):
+    """requests.get that follows redirects by hand so every hop passes validate_url.
+
+    Raises UnsafeURLError for an unsafe hop and RuntimeError after max_redirects.
+    """
+    for _ in range(max_redirects + 1):
+        validate_url(url)
+        response = requests.get(url, timeout=timeout, allow_redirects=False)
+        location = response.headers.get("Location")
+        if response.status_code not in _REDIRECT_CODES or not location:
+            return response
+        url = urljoin(url, location)
+    raise RuntimeError(f"too many redirects: {url}")

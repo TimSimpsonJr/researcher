@@ -3,8 +3,12 @@ requests and the clock are faked; nothing touches the network."""
 
 import pytest
 
+import url_safety
 import wayback
 from block_detect import FetchResult, Verdict
+from url_safety import UnsafeURLError
+
+REAL_VALIDATE = url_safety.validate_url
 
 ARTICLE_HTML = (
     "<html><head><title>Agenda</title></head><body><p>"
@@ -62,6 +66,7 @@ def net(monkeypatch):
 
     monkeypatch.setattr(wayback.requests, "get", get)
     monkeypatch.setattr(wayback, "validate_url", validated.append)
+    monkeypatch.setattr(url_safety, "validate_url", lambda url: None)  # per-hop checks, offline
     return queue, calls, validated
 
 
@@ -150,6 +155,23 @@ def test_walled_snapshot_is_blocked_with_no_content(clock, net, tmp_path):
                              headers={"Content-Type": "text/html"})]
     result = wayback.fetch("https://x.gov/a", tmp_path)
     assert result.verdict == Verdict("blocked", "cloudflare") and result.content == ""
+
+
+def test_snapshot_redirect_to_internal_host_is_unsafe(clock, net, tmp_path, monkeypatch):
+    queue, calls, _ = net
+    monkeypatch.setattr(url_safety, "validate_url", REAL_VALIDATE)
+    queue += [cdx_ok(), Resp(302, headers={"Location": "http://127.0.0.1/secret"})]
+    with pytest.raises(UnsafeURLError):
+        wayback.fetch("https://93.184.216.34/a", tmp_path)
+    assert len(calls) == 2  # the internal hop was never requested
+
+
+def test_snapshot_redirect_within_the_archive_is_followed(clock, net, tmp_path):
+    queue, calls, _ = net
+    queue += [cdx_ok(), Resp(302, headers={"Location": "/web/20250102id_/https://x.gov/agenda"}),
+              Resp(200, text=ARTICLE_HTML, headers={"Content-Type": "text/html"})]
+    assert wayback.fetch("https://x.gov/agenda", tmp_path).verdict.ok
+    assert calls[2][0] == "https://web.archive.org/web/20250102id_/https://x.gov/agenda"
 
 
 def test_pdf_snapshot_goes_to_pdf_extract(clock, net, tmp_path, monkeypatch):

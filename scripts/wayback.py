@@ -18,7 +18,7 @@ import requests
 from block_detect import FetchResult, Verdict, classify
 from pdf_extract import looks_like_pdf, to_result
 from text_utils import html_to_text
-from url_safety import validate_url
+from url_safety import get_validated, validate_url
 
 CDX_API = "https://web.archive.org/cdx/search/cdx"
 RAW_URL = "https://web.archive.org/web/{ts}id_/{url}"
@@ -72,11 +72,17 @@ def _retry_delay(response, attempt: int) -> float:
     return BACKOFF_BASE_S * 2 ** attempt
 
 
-def _get(url: str, **kwargs):
-    """GET through the limiter; retries 429/503. Returns the last response."""
+def _get(url: str, validated: bool = False, **kwargs):
+    """GET through the limiter; retries 429/503. Returns the last response.
+
+    validated=True follows redirects by hand, checking every hop (url_safety).
+    """
     for attempt in range(MAX_TRIES):
         with LIMITER.slot():
-            response = requests.get(url, timeout=(10, 60), **kwargs)
+            if validated:
+                response = get_validated(url, timeout=(10, 60))
+            else:
+                response = requests.get(url, timeout=(10, 60), **kwargs)
         if response.status_code not in RETRY_STATUSES or attempt == MAX_TRIES - 1:
             return response
         LIMITER.defer(_retry_delay(response, attempt))
@@ -99,7 +105,7 @@ def fetch(url: str, cache_dir: Path) -> FetchResult:
         return FetchResult(Verdict("missing", "no_snapshot"), method="wayback")
     archived = raw_url(rows[-1][0], url)
     validate_url(archived)
-    response = _get(archived)
+    response = _get(archived, validated=True)
     ctype = response.headers.get("Content-Type", "")
     if response.status_code != 200:
         return FetchResult(classify(response.status_code, ctype, ""), method="wayback", content_type=ctype)
