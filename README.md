@@ -96,6 +96,24 @@ Researcher runs on three tiers, and figures out which one you're on automaticall
 
 `/researcher-setup` checks what you have and can start the optional pieces for you.
 
+### Pages that block scripts, and scanned PDFs
+
+Some sites put up a bot check or refuse scripted downloads. Researcher then tries a local headless Chromium, then the Wayback Machine (gently, one request at a time). Setup offers to install Chromium into the plugin's own folder (about 115 MB to download, 270 MB on disk); you can also do it yourself:
+
+```
+PLAYWRIGHT_BROWSERS_PATH="<plugin root>/.cache/ms-playwright" uv run --frozen --project "<plugin root>" playwright install chromium --only-shell
+```
+
+Pages that still won't open are read in the Claude desktop browser pane when it's available. Otherwise they're listed at the end of the run so you can open them yourself. Researcher never solves CAPTCHAs.
+
+Scanned PDFs need [Tesseract](https://github.com/tesseract-ocr/tesseract) for OCR. It's optional; without it, those PDFs are flagged so Claude reads the page images instead.
+
+```
+winget install UB-Mannheim.TesseractOCR
+```
+
+That's the Windows install; on macOS or Linux, use your package manager's `tesseract`. To see what's installed, run `rw.py check playwright` or `rw.py check tesseract`.
+
 ### Project layout
 
 See [MANIFEST.md](MANIFEST.md) for the full file tree and how the pieces fit together.
@@ -119,7 +137,7 @@ The Python suite runs offline, no API key needed. The batch workflow's JavaScrip
 
 **Requirements:** [uv](https://docs.astral.sh/uv/) (it provides Python 3.12), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and an [Obsidian](https://obsidian.md/) vault.
 
-**Optional (full tier):** Docker (for SearXNG), Ollama, Playwright, `yt-dlp`, `openai-whisper`.
+**Optional (full tier):** Docker (for SearXNG), Ollama, Playwright's Chromium (see above), Tesseract, `yt-dlp`, `openai-whisper`. The real-browser test (`uv run --frozen pytest -m browser`) skips until Chromium is installed.
 
 ## Part of the Fieldwork suite
 - [Researcher](https://github.com/TimSimpsonJr/researcher): gather sources into cited notes
