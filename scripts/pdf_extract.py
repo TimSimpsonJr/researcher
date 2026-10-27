@@ -5,8 +5,12 @@ integration when Tesseract is installed. When it isn't, or OCR fails, and most
 pages are still empty, the bytes are kept under cache_dir/pdf/<sha256>.pdf and
 the result is flagged image_only_pdf so a Claude summarizer can Read the page
 images instead. Text from pages that do have a layer is always returned.
+
+Known limit: a genuinely blank PDF is indistinguishable from a scan and is
+flagged image-only too.
 """
 
+import functools
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,10 +18,12 @@ from urllib.parse import urlparse
 
 import pymupdf
 
-from block_detect import MIN_USEFUL_CONTENT_CHARS, OK, FetchResult, Verdict
+from block_detect import MIN_USEFUL_CONTENT_CHARS, OK, FetchResult, Verdict, blocked
 
 EMPTY_PAGE_CHARS = 20  # fewer stripped chars than this = no usable text layer
 OCR_DPI = 300
+# ponytail: OCR capped at 50 pages per document; raise or make configurable if long scans matter
+MAX_OCR_PAGES = 50
 
 
 @dataclass
@@ -38,6 +44,7 @@ def looks_like_pdf(url: str, content_type: str, head: bytes = b"") -> bool:
     )
 
 
+@functools.lru_cache(maxsize=1)
 def tesseract_available() -> bool:
     """PyMuPDF finds Tesseract's language data (TESSDATA_PREFIX or an install)."""
     try:
@@ -58,12 +65,14 @@ def _is_empty(text: str) -> bool:
 
 def extract(pdf_bytes: bytes, cache_dir: Path) -> tuple[str, PdfInfo]:
     with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+        if doc.needs_pass and not doc.authenticate(""):
+            raise ValueError("encrypted")
         texts = [page.get_text() for page in doc]
         empty = [i for i, t in enumerate(texts) if _is_empty(t)]
         method, ocr_failed = "pdf-local", False
         if empty and tesseract_available():
             method = "pdf-ocr"
-            for i in empty:
+            for i in empty[:MAX_OCR_PAGES]:
                 try:
                     texts[i] = _ocr_page(doc[i])
                 except Exception:
@@ -82,14 +91,26 @@ def extract(pdf_bytes: bytes, cache_dir: Path) -> tuple[str, PdfInfo]:
 
 def to_result(pdf_bytes: bytes, cache_dir: Path) -> FetchResult:
     """extract() as a FetchResult. An image-only PDF is ok: the visual read covers it."""
-    text, info = extract(pdf_bytes, cache_dir)
+    if b"%PDF" not in pdf_bytes[:1024]:  # pymupdf happily opens HTML as a "pdf"
+        return FetchResult(
+            verdict=blocked("not_pdf"), method="pdf-local", content_type="application/pdf"
+        )
+    try:
+        text, info = extract(pdf_bytes, cache_dir)
+    except (pymupdf.FileDataError, pymupdf.EmptyFileError, ValueError, RuntimeError) as e:
+        return FetchResult(
+            verdict=blocked(f"error:{type(e).__name__}"),
+            method="pdf-local",
+            content_type="application/pdf",
+            error=str(e),
+        )
     if info.image_only_pdf or len(text) >= MIN_USEFUL_CONTENT_CHARS:
         verdict = OK
     else:
         verdict = Verdict("thin", f"{len(text)}_chars")
     return FetchResult(
         verdict=verdict,
-        content=text,
+        content=text if verdict.ok else "",
         title=info.title,
         method=info.method,
         content_type="application/pdf",

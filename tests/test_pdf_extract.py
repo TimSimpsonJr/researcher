@@ -12,23 +12,57 @@ LINE = "Board meeting minutes: the council approved the camera contract, page {}
 
 
 def _text_pdf(n_pages: int) -> bytes:
-    doc = pymupdf.open()
-    for i in range(n_pages):
-        doc.new_page().insert_text((72, 72), LINE.format(i + 1), fontsize=11)
-    return doc.tobytes()
+    with pymupdf.open() as doc:
+        for i in range(n_pages):
+            doc.new_page().insert_text((72, 72), LINE.format(i + 1), fontsize=11)
+        return doc.tobytes()
 
 
 def _image_only_pdf(n_pages: int, text_pages: int = 0) -> bytes:
     """text_pages real text pages, then n_pages pages that are only a picture of text."""
-    src = pymupdf.open(stream=_text_pdf(n_pages), filetype="pdf")
-    out = pymupdf.open()
-    for i in range(text_pages):
-        out.new_page().insert_text((72, 72), LINE.format(f"text-{i + 1}"), fontsize=11)
-    for page in src:
-        pix = page.get_pixmap(dpi=100)
-        new = out.new_page(width=page.rect.width, height=page.rect.height)
-        new.insert_image(new.rect, pixmap=pix)
-    return out.tobytes()
+    with pymupdf.open(stream=_text_pdf(n_pages), filetype="pdf") as src, pymupdf.open() as out:
+        for i in range(text_pages):
+            out.new_page().insert_text((72, 72), LINE.format(f"text-{i + 1}"), fontsize=11)
+        for page in src:
+            pix = page.get_pixmap(dpi=100)
+            new = out.new_page(width=page.rect.width, height=page.rect.height)
+            new.insert_image(new.rect, pixmap=pix)
+        return out.tobytes()
+
+
+def _blank_pdf(n_pages: int) -> bytes:
+    with pymupdf.open() as doc:
+        for _ in range(n_pages):
+            doc.new_page(width=50, height=50)
+        return doc.tobytes()
+
+
+def test_html_bytes_are_not_a_pdf(tmp_path, no_ocr):
+    r = pdf_extract.to_result(b"<html><body>Access denied</body></html>", tmp_path)
+    assert not r.verdict.ok and r.verdict.reason == "not_pdf"
+    assert not (tmp_path / "pdf").exists()
+
+
+def test_corrupt_pdf_returns_blocked_verdict(tmp_path, no_ocr):
+    r = pdf_extract.to_result(b"%PDF-1.4\n1 0 obj", tmp_path)
+    assert r.verdict.kind == "blocked" and r.verdict.reason.startswith("error:")
+    assert r.error
+
+
+def test_encrypted_pdf_returns_blocked_verdict(tmp_path, no_ocr):
+    with pymupdf.open(stream=_text_pdf(1), filetype="pdf") as doc:
+        data = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="u", owner_pw="o")
+    r = pdf_extract.to_result(data, tmp_path)
+    assert r.verdict.kind == "blocked" and r.verdict.reason == "error:ValueError"
+
+
+def test_ocr_is_capped_at_max_pages(tmp_path, monkeypatch):
+    monkeypatch.setattr(pdf_extract, "tesseract_available", lambda: True)
+    calls = []
+    monkeypatch.setattr(pdf_extract, "_ocr_page", lambda page: calls.append(1) or "Recognised text from a scanned page.")
+    text, info = pdf_extract.extract(_blank_pdf(pdf_extract.MAX_OCR_PAGES + 10), tmp_path)
+    assert len(calls) == pdf_extract.MAX_OCR_PAGES
+    assert info.empty_pages == 10 and info.image_only_pdf is False
 
 
 @pytest.fixture
@@ -90,6 +124,6 @@ def test_to_result_verdicts(tmp_path, no_ocr):
     full = pdf_extract.to_result(_text_pdf(5), tmp_path)
     assert full.verdict.ok and full.method == "pdf-local" and full.is_pdf
     thin = pdf_extract.to_result(_text_pdf(1), tmp_path)
-    assert thin.verdict.kind == "thin"
+    assert thin.verdict.kind == "thin" and thin.content == ""
     scanned = pdf_extract.to_result(_image_only_pdf(2), tmp_path)
     assert scanned.verdict.ok and scanned.image_only_pdf and scanned.pdf_path
