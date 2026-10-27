@@ -187,7 +187,7 @@ def test_guard_aborted_redirect_renavigates_once_to_the_final_url(tmp_path):
     session._last_nav_url["https://a.gov/r"] = "https://b.gov/final"
     result = session.fetch("https://a.gov/r", tmp_path)
     assert result.verdict.ok and page.visited == ["https://a.gov/r", "https://b.gov/final"]
-    assert session._last_nav_url == {}
+    assert session._last_nav_url == {} and session._goto_target is None
 
 
 def test_second_guard_abort_is_not_followed_again(tmp_path):
@@ -216,10 +216,11 @@ def _reject(monkeypatch, *needles):
 
 
 class FakeRoute:
-    def __init__(self, url, navigation=False, fetched=None, method="GET", post=None, main_frame=True):
+    def __init__(self, url, navigation=False, fetched=None, method="GET", post=None, main_frame=True,
+                 headers=None):
         self.request = types.SimpleNamespace(
             url=url, is_navigation_request=lambda: navigation, method=method, post_data_buffer=post,
-            frame=types.SimpleNamespace(parent_frame=None if main_frame else object()))
+            headers=headers or {}, frame=types.SimpleNamespace(parent_frame=None if main_frame else object()))
         self.outcome = None
         self._fetched = fetched  # a response, a {url: response} dict, or an Exception
         self.fetch_calls = []
@@ -272,6 +273,7 @@ def test_two_hop_chain_to_internal_host_is_aborted_without_fetching_it(monkeypat
 def test_redirected_public_chain_is_aborted_and_the_final_url_recorded(monkeypatch):
     _reject(monkeypatch, "127.0.0.1")
     session = fetch_playwright.BrowserSession()
+    session._goto_target = "https://a.gov/r1"  # a goto() from _fetch, which can re-navigate
     hops = [FakeResponse(302, {"location": "/r2"}), FakeResponse(302, {"location": "https://b.gov/page"}),
             FakeResponse(200)]
     route = FakeRoute("https://a.gov/r1", navigation=True, fetched={
@@ -285,6 +287,22 @@ def test_redirected_public_chain_is_aborted_and_the_final_url_recorded(monkeypat
     assert all(h.disposed for h in hops)
 
 
+def test_script_initiated_redirected_navigation_is_fulfilled_not_recorded(monkeypatch):
+    # e.g. a challenge form POST -> 302: nothing re-navigates, so the page must get the response.
+    session = fetch_playwright.BrowserSession()
+    session._goto_target = "https://a.gov/challenge"
+    final = FakeResponse(200)
+    route = FakeRoute("https://a.gov/post", navigation=True, method="POST", post=b"x=1", fetched={
+        "https://a.gov/post": FakeResponse(302, {"location": "/final"}), "https://a.gov/final": final})
+    session._guard(route)
+    assert route.outcome == ("fulfill", final) and session._last_nav_url == {}
+    idle = fetch_playwright.BrowserSession()  # no goto in flight at all
+    route = FakeRoute("https://a.gov/r", navigation=True, fetched={
+        "https://a.gov/r": FakeResponse(302, {"location": "/f"}), "https://a.gov/f": FakeResponse(200)})
+    idle._guard(route)
+    assert route.outcome[0] == "fulfill" and idle._last_nav_url == {}
+
+
 def test_redirected_subframe_navigation_is_fulfilled_not_recorded(monkeypatch):
     session = fetch_playwright.BrowserSession()
     final = FakeResponse(200)
@@ -296,10 +314,13 @@ def test_redirected_subframe_navigation_is_fulfilled_not_recorded(monkeypatch):
 
 def test_post_is_not_resent_after_a_redirect(monkeypatch):
     session = fetch_playwright.BrowserSession()
-    route = FakeRoute("https://a.gov/form", navigation=True, method="POST", post=b"a=1", fetched={
+    headers = {"Content-Type": "application/x-www-form-urlencoded", "Content-Length": "3", "X-A": "1"}
+    route = FakeRoute("https://a.gov/form", navigation=True, method="POST", post=b"a=1", headers=headers, fetched={
         "https://a.gov/form": FakeResponse(302, {"location": "/done"}), "https://a.gov/done": FakeResponse(200)})
     session._guard(route)
     assert [(c["method"], c["post_data"]) for c in route.fetch_calls] == [("POST", b"a=1"), ("GET", None)]
+    assert "headers" not in route.fetch_calls[0]  # first hop: the request's own headers
+    assert route.fetch_calls[1]["headers"] == {"X-A": "1"}
 
 
 def test_post_keeps_method_on_307_and_becomes_get_on_303(monkeypatch):
@@ -718,3 +739,51 @@ def test_real_browser_redirected_page_runs_under_its_final_url(tmp_path, monkeyp
         server.shutdown()
     assert result.verdict.ok and result.title == "Final"
     assert "/sub/rel.js" in paths and "/rel.js" not in paths
+
+
+@pytest.mark.browser
+def test_real_browser_challenge_form_post_redirect_still_clears(tmp_path, monkeypatch):
+    # A script-submitted form POST that 302s to the clean page must reach the page, not be aborted.
+    _chromium_or_skip()
+    posts = []
+
+    class Site(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/challenge":
+                body = (b"<html><head><title>Just a moment...</title></head><body>"
+                        b"<h2>Verify you are human by completing the action below.</h2>"
+                        b'<form id="f" method="post" action="/post"><input name="t" value="1"></form>'
+                        b"<script>document.getElementById('f').submit()</script></body></html>")
+            elif self.path == "/final":
+                body = (f"<html><head><title>Done</title></head><body><p>CLEARED "
+                        f"{'Public page text. ' * 20}</p></body></html>").encode()
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            posts.append(self.path)
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(302)
+            self.send_header("Location", "/final")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Site)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(fetch_playwright, "validate_url", lambda url: None)
+    try:
+        with fetch_playwright.BrowserSession(profile_dir=tmp_path / "profile") as session:
+            assert session.available
+            result = session.fetch(f"http://localhost:{server.server_address[1]}/challenge", tmp_path / "cache")
+    finally:
+        server.shutdown()
+    assert posts == ["/post"]
+    assert result.verdict.ok and "CLEARED" in result.content

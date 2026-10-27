@@ -64,6 +64,7 @@ class BrowserSession:
         self._tmp_profile = None
         self._host_ok: dict[tuple[str, str], bool] = {}
         self._last_nav_url: dict[str, str] = {}
+        self._goto_target: str | None = None  # URL of the goto() in flight (one page at a time)
 
     def __enter__(self):
         use_repo_browsers()
@@ -130,6 +131,7 @@ class BrowserSession:
         method, post = request.method, request.post_data_buffer
         deadline = time.monotonic() + NAV_TIMEOUT_MS / 1000
         current = url
+        extra: dict = {}  # headers override once a POST has become a GET
         for _ in range(MAX_REDIRECTS + 1):
             remaining_ms = (deadline - time.monotonic()) * 1000
             if remaining_ms <= 0:
@@ -137,7 +139,7 @@ class BrowserSession:
                 return
             try:
                 response = route.fetch(url=current, method=method, post_data=post,
-                                       max_redirects=0, timeout=max(1000, int(remaining_ms)))
+                                       max_redirects=0, timeout=max(1000, int(remaining_ms)), **extra)
             except Exception as exc:
                 print(f"[fetch_playwright] navigation fetch failed for {current}: {exc}", file=sys.stderr)
                 route.abort("failed")
@@ -153,9 +155,14 @@ class BrowserSession:
                     return
                 if status == 303 or (status in (301, 302) and method == "POST"):
                     method, post = "GET", None
+                    extra = {"headers": {k: v for k, v in request.headers.items()
+                                         if k.lower() not in ("content-type", "content-length")}}
                 current = target
                 continue
-            if current != url and request.frame.parent_frame is None:
+            # Only a goto() issued by _fetch can re-navigate to the final URL. Other redirected
+            # navigations (a script-submitted challenge form, a link click) are fulfilled with the
+            # final response: the content is readable, but the page origin stays the original URL.
+            if current != url and request.frame.parent_frame is None and url == self._goto_target:
                 self._last_nav_url[url] = current
                 _dispose(response)
                 route.abort("aborted")
@@ -200,6 +207,7 @@ class BrowserSession:
         try:
             while True:
                 try:
+                    self._goto_target = target
                     response = page.goto(target, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
                     break
                 except Exception as exc:
@@ -241,7 +249,8 @@ class BrowserSession:
             return FetchResult(verdict, text, title, "playwright", ctype)
         finally:
             page.close()
-            self._last_nav_url.pop(url, None)
+            self._last_nav_url.clear()
+            self._goto_target = None
 
     def _get(self, url: str):
         """GET through the session, validating every redirect hop."""
