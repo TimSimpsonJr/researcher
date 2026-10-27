@@ -100,3 +100,17 @@ test('inline-sync: workflow schemas block matches lib/schemas.js', () => {
   const expected = norm(stripExports(readFileSync(join(ROOT, 'lib', 'schemas.js'), 'utf8')));
   assert.equal(m[1].trim(), expected.trim(), 'inlined schemas drifted from lib/schemas.js — run `node tools/reinline-workflow.mjs`');
 });
+
+test('manual_urls: runner schema accepts them and the workflow surfaces them', async () => {
+  const { SUMMARIES } = await import('../lib/schemas.js');
+  const mu = SUMMARIES.properties.manual_urls;
+  assert.equal(mu?.type, 'array', 'SUMMARIES must declare manual_urls');
+  assert.deepEqual(mu.items.required, ['url']);
+  const src = norm(readFileSync(WF, 'utf8'));
+  assert.match(src, /summaryResult\?\.manual_urls/, 'ingestHopResults must collect manual_urls');
+  assert.match(src, /manual_urls:\s*research\.manual_urls/, 'run() result must carry manual_urls');
+});
+
+test('workflow file is LF-only (Workflow scriptPath rejects CRLF)', () => {
+  assert.ok(!readFileSync(WF, 'utf8').includes('\r'));
+});

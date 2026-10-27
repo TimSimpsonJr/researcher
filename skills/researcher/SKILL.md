@@ -1381,9 +1381,13 @@ The workflow's agents draw from the turn's **shared budget pool**, so a `+Nk`/bu
 
 ### 4B.3 Thread-selection gate
 
-The result is `{written_notes, updated_notes, threads, summary}`. If `summary.aborted` / `aborted:true`, report `reason` and stop. Otherwise:
+The result is `{written_notes, updated_notes, threads, manual_urls, summary}` (`manual_urls`: `{topic, url, reason}` pages the runners could not read, deduped by URL). If `summary.aborted` / `aborted:true`, report `reason` and stop. Otherwise:
 ```
 Batch complete: {notes_written} written, {notes_updated} updated{, {N} low-confidence flagged}.
+{if manual_urls:}
+Needs a manual read ({count}): pages behind a CAPTCHA, or read with no browser available.
+  - {url} ({reason}) [{topic}]
+{end}
 Follow-up threads:
   1. {topic} (score {score}, {novelty_status}) — {rationale}
   ...
@@ -1398,6 +1402,7 @@ Record the **complete** run marker. Present:
 ```
 {project}: {notes_written} written, {notes_updated} updated, {threads_found} threads.
 {low-confidence topics flagged, if any} · {failures, if any}
+{manual_urls (url, reason), if any, so the user can read them by hand}
 Notes are in the vault.
 ```
 Done. (Stages 4–10 are the inline alternative and are not run on this path.)

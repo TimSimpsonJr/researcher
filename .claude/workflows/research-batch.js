@@ -149,6 +149,15 @@ const SUMMARIES = {
         },
       },
     },
+    // needs_browser pages the runner could not read; surfaced to the user.
+    manual_urls: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['url'],
+        properties: { url: { type: 'string' }, reason: { type: 'string' } },
+      },
+    },
   },
 };
 
@@ -526,6 +535,11 @@ function ingestHopResults(topic, searchResult, summaryResult) {
   for (const sel of searchResult?.selected_urls ?? []) {
     if (sel?.url && !seen.has(sel.url)) { topic.seen_urls.push(sel.url); seen.add(sel.url); }
   }
+  if (!Array.isArray(topic.manual_urls)) topic.manual_urls = [];
+  const haveManual = new Set(topic.manual_urls.map((m) => m.url));
+  for (const m of summaryResult?.manual_urls ?? []) {
+    if (m?.url && !haveManual.has(m.url)) { topic.manual_urls.push({ topic: topic.topic, url: m.url, reason: m.reason ?? null }); haveManual.add(m.url); }
+  }
   return topic;
 }
 
@@ -608,6 +622,18 @@ function collectSummaries(topics) {
   return out;
 }
 
+// Flatten every topic's manual_urls, deduped by URL across topics.
+function collectManualUrls(topics) {
+  const seen = new Set();
+  const out = [];
+  for (const t of Array.isArray(topics) ? topics : []) {
+    for (const m of t.manual_urls ?? []) {
+      if (m?.url && !seen.has(m.url)) { seen.add(m.url); out.push(m); }
+    }
+  }
+  return out;
+}
+
 // --------------------------------------------------------------------------
 // Research phase — multi-hop loop + JS quality gate (<=2 auto-replans).
 // --------------------------------------------------------------------------
@@ -655,7 +681,7 @@ async function runResearch(topics, config) {
     const failing = failingTopics(topics);
     if (!failing.length) {
       log?.('research-batch: quality gate passed — all topics met their confidence target.');
-      return { summaries: collectSummaries(topics), topics, low_confidence: [] };
+      return { summaries: collectSummaries(topics), manual_urls: collectManualUrls(topics), topics, low_confidence: [] };
     }
     if (replanCount < MAX_AUTO_REPLANS) {
       replanCount += 1;
@@ -665,7 +691,7 @@ async function runResearch(topics, config) {
     }
     // No mid-run gate: flag the still-low topics and proceed to write.
     log?.(`research-batch: ${failing.length} topic(s) still low-confidence after ${replanCount} replans — flagging (not gating).`);
-    return { summaries: collectSummaries(topics), topics, low_confidence: failing.map((t) => t.topic) };
+    return { summaries: collectSummaries(topics), manual_urls: collectManualUrls(topics), topics, low_confidence: failing.map((t) => t.topic) };
   }
 }
 
@@ -743,6 +769,7 @@ async function run(args) {
     written_notes: write.written_notes,
     updated_notes: write.updated_notes,
     threads,
+    manual_urls: research.manual_urls ?? [],
     summary: {
       project: plan.project ?? null,
       topics: topics.length,
