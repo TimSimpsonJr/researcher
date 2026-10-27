@@ -1107,7 +1107,7 @@ with:
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "browser: drives a real Chromium (uv run --frozen playwright install chromium); skipped when it is missing",
+    "browser: drives a real Chromium (uv run --frozen playwright install chromium --only-shell); skipped when it is missing",
 ]
 ```
 
@@ -1298,7 +1298,7 @@ def _chromium_or_skip():
     except Exception as exc:
         pytest.skip(f"playwright unusable: {exc}")
     if not exe.exists():
-        pytest.skip("Chromium not installed (uv run --frozen playwright install chromium)")
+        pytest.skip("Chromium not installed (uv run --frozen playwright install chromium --only-shell)")
 
 
 @pytest.mark.browser
@@ -2405,7 +2405,7 @@ def test_playwright_detection_needs_chromium(monkeypatch, tmp_path):
     from detect_tier import check_playwright
     _fake_playwright(monkeypatch, tmp_path / "chrome.exe")
     result = check_playwright()
-    assert result["status"] == "missing" and "playwright install chromium" in result["install"]
+    assert result["status"] == "missing" and "playwright install chromium --only-shell" in result["install"]
 
 
 def test_playwright_detection_when_available(monkeypatch, tmp_path):
@@ -2464,7 +2464,7 @@ Expected: FAIL: the old `check_playwright` reports `ok` for any importable packa
 
 In `scripts/detect_tier.py`, add `import pdf_extract` below `import requests`, then replace `check_playwright` (lines 94-100) with:
 ```python
-PLAYWRIGHT_INSTALL = 'uv run --frozen --project "<plugin root>" playwright install chromium'
+PLAYWRIGHT_INSTALL = 'uv run --frozen --project "<plugin root>" playwright install chromium --only-shell'
 TESSERACT_INSTALL = "winget install UB-Mannheim.TesseractOCR"
 
 
@@ -2547,7 +2547,7 @@ Expected: `Installed N packages` including playwright.
 
 This downloads about 150 MB from Playwright's CDN. Run it only if the user approved the download in this session; otherwise skip this step and say so in your report (the browser test keeps skipping).
 ```bash
-uv run --frozen --project C:/Users/tim/workspace/research-workflow playwright install chromium
+uv run --frozen --project C:/Users/tim/workspace/research-workflow playwright install chromium --only-shell
 uv run --frozen pytest -m browser -v
 ```
 Expected: `test_real_browser_reads_file_html_and_served_pdf PASSED`.
@@ -3291,12 +3291,12 @@ def test_stage_10b_lists_manual_urls():
 def test_setup_installs_chromium_and_checks_tesseract():
     setup = _SETUP_MD.read_text(encoding="utf-8")
     assert ('PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" '
-            'uv run --frozen --project "REPO" playwright install chromium') in setup
+            'uv run --frozen --project "REPO" playwright install chromium --only-shell') in setup
     assert 'rw.py" check playwright' in setup and 'rw.py" check tesseract' in setup
     assert "winget install UB-Mannheim.TesseractOCR" in setup
 ```
 
-**Scanner change (part of this task):** the existing single-line `uv run` scanner in `tests/test_skill_contract.py` must accept a leading `PLAYWRIGHT_BROWSERS_PATH=...` env prefix on a command line (for example `PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" uv run --frozen --project "REPO" playwright install chromium`). Update its regex and add a test that such a line is accepted while other leading text is still rejected. Browsers are installed repo-locally because `%LOCALAPPDATA%` is virtualized under the Claude desktop (MSIX) app.
+**Scanner change (part of this task):** the existing single-line `uv run` scanner in `tests/test_skill_contract.py` must accept a leading `PLAYWRIGHT_BROWSERS_PATH=...` env prefix on a command line (for example `PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" uv run --frozen --project "REPO" playwright install chromium --only-shell`). Update its regex and add a test that such a line is accepted while other leading text is still rejected. Browsers are installed repo-locally because `%LOCALAPPDATA%` is virtualized under the Claude desktop (MSIX) app.
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -3409,7 +3409,7 @@ uv run --frozen --project "REPO" "REPO/scripts/rw.py" check playwright
 ```
 If `status` is not `ok`, use AskUserQuestion: "Download Chromium for the local browser fallback (about 150 MB)? [yes / skip]". On yes:
 ```bash
-PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" uv run --frozen --project "REPO" playwright install chromium
+PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" uv run --frozen --project "REPO" playwright install chromium --only-shell
 ```
 Then run the check again and report the result. On skip, note that pages behind bot walls will go to the orchestrator's browser or the manual-read list instead.
 ````
@@ -3556,7 +3556,7 @@ with:
 Some sites put up a bot check or refuse scripted downloads. Researcher then tries a local Chromium, then the Wayback Machine (gently, one request at a time). Setup offers to download Chromium (about 150 MB); you can also do it yourself:
 
 ```
-PLAYWRIGHT_BROWSERS_PATH=<plugin root>/.cache/ms-playwright uv run --frozen --project <plugin root> playwright install chromium
+PLAYWRIGHT_BROWSERS_PATH=<plugin root>/.cache/ms-playwright uv run --frozen --project <plugin root> playwright install chromium --only-shell
 ```
 
 Pages that still won't open are read in Claude Code's browser pane when it's available. Pages behind a CAPTCHA are never solved for you: they're listed at the end of the run so you can open them yourself.
@@ -3575,7 +3575,7 @@ Replace:
 ```
 with:
 ```
-**Optional (full tier):** Docker (for SearXNG), Ollama, Playwright's Chromium (`PLAYWRIGHT_BROWSERS_PATH=<plugin root>/.cache/ms-playwright uv run --frozen --project <plugin root> playwright install chromium`), Tesseract, `yt-dlp`, `openai-whisper`. The real-browser test (`uv run --frozen pytest -m browser`) skips until Chromium is installed.
+**Optional (full tier):** Docker (for SearXNG), Ollama, Playwright's Chromium (`PLAYWRIGHT_BROWSERS_PATH=<plugin root>/.cache/ms-playwright uv run --frozen --project <plugin root> playwright install chromium --only-shell`), Tesseract, `yt-dlp`, `openai-whisper`. The real-browser test (`uv run --frozen pytest -m browser`) skips until Chromium is installed.
 ```
 
 - [ ] **Step 2: Run the full suite**

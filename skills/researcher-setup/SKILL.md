@@ -35,7 +35,7 @@ Then check the local browser fallback, which reads pages and PDFs that block scr
 ```bash
 uv run --frozen --project "REPO" "REPO/scripts/rw.py" check playwright
 ```
-If `status` is not `ok`, use AskUserQuestion: "Download Chromium's headless shell for the local browser fallback (roughly 100–300 MB download, stored in REPO/.cache)? [yes / skip]". On yes:
+If `status` is not `ok`, use AskUserQuestion: "Download Chromium's headless shell for the local browser fallback (about 115 MB download, about 270 MB on disk, stored in REPO/.cache)? [yes / skip]". On yes:
 ```bash
 PLAYWRIGHT_BROWSERS_PATH="REPO/.cache/ms-playwright" uv run --frozen --project "REPO" playwright install chromium --only-shell
 ```
