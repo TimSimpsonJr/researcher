@@ -3,8 +3,8 @@
 BrowserSession runs one Chromium per fetch run with a persistent profile under
 .cache/browser-profile/, so cookies a site sets (including a cleared Cloudflare
 check) carry across URLs and across runs; the profile is safe to delete. If it
-is locked, a throwaway temp profile is used instead. HTML pages wait up to CHALLENGE_WAIT_S while a
-passive challenge clears, then return readable text. PDFs (by URL, response
+is locked, a throwaway temp profile is used instead. HTML pages wait up to
+CHALLENGE_WAIT_S while a passive challenge clears, then return readable text. PDFs (by URL, response
 content type, or a download navigation) are fetched with the session's request
 context, which shares its cookies, and go to pdf_extract. An interactive
 CAPTCHA is never touched: it comes back as blocked("captcha"). No fingerprint
@@ -112,6 +112,7 @@ class BrowserSession:
         self.available = False
         if self._tmp_profile:
             shutil.rmtree(self._tmp_profile, ignore_errors=True)
+            self._tmp_profile = None
 
     def fetch(self, url: str, cache_dir: Path) -> FetchResult:
         """Raises UnsafeURLError, timeouts and network errors; callers wrap with _try."""
