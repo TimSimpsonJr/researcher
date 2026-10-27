@@ -92,7 +92,20 @@ class BrowserSession:
     def _guard(self, route) -> None:
         url = route.request.url
         if self._allowed(url):
-            route.continue_()
+            if route.request.is_navigation_request() and urlparse(url).scheme in ("http", "https"):
+                # context.route never sees navigation redirect hops, so follow them here:
+                # fetch without redirects, check the target, then hand the 3xx to the browser.
+                response = route.fetch(max_redirects=0)
+                location = response.headers.get("location")
+                if response.status in _REDIRECT_CODES and location:
+                    target = urljoin(url, location)
+                    if not self._allowed(target):
+                        print(f"[fetch_playwright] blocked internal request: {target}", file=sys.stderr)
+                        route.abort("blockedbyclient")
+                        return
+                route.fulfill(response=response)
+            else:
+                route.continue_()
         else:
             print(f"[fetch_playwright] blocked internal request: {url}", file=sys.stderr)
             route.abort("blockedbyclient")

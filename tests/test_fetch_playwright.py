@@ -175,15 +175,67 @@ def _reject(monkeypatch, *needles):
 
 
 class FakeRoute:
-    def __init__(self, url):
-        self.request = types.SimpleNamespace(url=url)
+    def __init__(self, url, navigation=False, fetched=None):
+        self.request = types.SimpleNamespace(url=url, is_navigation_request=lambda: navigation)
         self.outcome = None
+        self._fetched = fetched
+        self.fetch_args = None
 
     def continue_(self):
         self.outcome = "continue"
 
     def abort(self, code):
         self.outcome = code
+
+    def fetch(self, **kwargs):
+        self.fetch_args = kwargs
+        return self._fetched
+
+    def fulfill(self, response=None):
+        self.outcome = ("fulfill", response)
+
+
+def test_navigation_redirect_to_internal_host_is_aborted_before_it_is_sent(monkeypatch):
+    _reject(monkeypatch, "127.0.0.1")
+    session = fetch_playwright.BrowserSession()
+    route = FakeRoute("https://a.gov/r", navigation=True,
+                      fetched=FakeResponse(302, {"location": "http://127.0.0.1:9/secret"}))
+    session._guard(route)
+    assert route.fetch_args == {"max_redirects": 0}
+    assert route.outcome == "blockedbyclient"
+
+
+def test_navigation_redirect_to_public_host_is_fulfilled(monkeypatch):
+    _reject(monkeypatch, "127.0.0.1")
+    session = fetch_playwright.BrowserSession()
+    redirect = FakeResponse(302, {"location": "/next"})
+    route = FakeRoute("https://a.gov/r", navigation=True, fetched=redirect)
+    session._guard(route)
+    assert route.outcome == ("fulfill", redirect)
+
+
+def test_navigation_without_redirect_is_fulfilled(monkeypatch):
+    session = fetch_playwright.BrowserSession()
+    page = FakeResponse(200)
+    route = FakeRoute("https://a.gov/p", navigation=True, fetched=page)
+    session._guard(route)
+    assert route.outcome == ("fulfill", page)
+
+
+def test_non_http_navigation_just_continues(monkeypatch):
+    route = FakeRoute("file:///tmp/page.html", navigation=True)
+    fetch_playwright.BrowserSession()._guard(route)
+    assert route.outcome == "continue" and route.fetch_args is None
+
+
+def test_non_navigation_requests_keep_continue_and_abort(monkeypatch):
+    _reject(monkeypatch, "127.0.0.1")
+    session = fetch_playwright.BrowserSession()
+    ok, bad = FakeRoute("https://a.gov/img.png"), FakeRoute("http://127.0.0.1:9/img.png")
+    session._guard(ok)
+    session._guard(bad)
+    assert ok.outcome == "continue" and ok.fetch_args is None
+    assert bad.outcome == "blockedbyclient"
 
 
 def test_guard_aborts_internal_hosts_and_caches_lookups(monkeypatch):
@@ -428,7 +480,7 @@ def test_real_browser_blocks_subrequests_and_redirects_to_internal_hosts(tmp_pat
         server_a.shutdown()
         server_b.shutdown()
     # Observed with Playwright 1.63.0 / Chromium 153 (2026-10-27): context.route does NOT see
-    # navigation redirect hops, so B receives the redirected GET before the post-navigation
-    # page.url check raises (the response body is discarded, never returned). Subresources and
-    # the first request are guarded; redirect hops are only caught after the fact.
-    assert hits == ["/secret"]
+    # navigation redirect hops on its own (B used to receive the redirected GET). _guard now
+    # fetches navigations with max_redirects=0 and checks each Location before fulfilling,
+    # so B gets no hit at all.
+    assert hits == []
