@@ -523,7 +523,7 @@ current_hop: {hop_level}
 max_hops: {topic.max_hops}
 confidence_target: {topic.depth's target: quick 0.6, standard 0.7, deep 0.8, exhaustive 0.9}
 summaries_so_far: {path to all summaries this topic has collected across all hops}
-sources_so_far: {path to all sources this topic has collected}
+sources_so_far: {every fetch_results_hop{N}.json path for this topic, one per hop; hop-planner passes each to compute-confidence as a repeated --sources-file}
 hop_genealogy: {topic.hop_genealogy as JSON}
 seen_urls: {topic.seen_urls}
 vault_index_path: {VAULT}/.researcher/vault_index.db
@@ -574,7 +574,7 @@ Each topic has its own depth and therefore its own `confidence_target` (quick 0.
 uv run --frozen --project "REPO" "REPO/scripts/rw.py" quality-gate
 ```
 
-It prints `{passed, failing_topics, topics, worst_confidence, replan_count}`. A topic passes when its latest confidence (0.0 if it has none) is at least its depth's `confidence_target` and its `contradiction_rate` is at most 0.3. `failing_topics` lists those that don't, each with `topic`, `depth`, `confidence`, `contradiction_rate` and `replan_hint`.
+It prints `{passed, failing_topics, topics, superseded, worst_confidence, replan_count}`. A topic passes when its latest confidence (0.0 if it has none) is at least its depth's `confidence_target` and its `contradiction_rate` is at most 0.3. `failing_topics` lists those that don't, each with `topic`, `depth`, `confidence`, `contradiction_rate` and `replan_hint`.
 
 If `failing_topics` is empty: proceed to Stage 6 (classify).
 
@@ -586,7 +586,7 @@ uv run --frozen --project "REPO" "REPO/scripts/rw.py" mark-superseded --topic "T
 
 `quality-gate` then leaves it out of `topics` and `failing_topics` and lists it under `superseded`.
 
-For diagnostic display and the low-confidence note marker, `quality-gate` also returns `worst_confidence`: the lowest latest confidence across all topics (0.0 if none).
+For diagnostic display and the low-confidence note marker, `quality-gate` also returns `worst_confidence`: the lowest latest confidence across all non-superseded topics (0.0 if none).
 
 This is the value used downstream as `OVERALL_CONFIDENCE` in Stage 5c's user-decision payload and 5d's `final_confidence_score`. There is no single "run target" because depths are per-topic, but the worst-topic confidence is the meaningful number to surface in user prompts and frontmatter callouts.
 

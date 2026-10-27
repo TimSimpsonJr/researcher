@@ -139,6 +139,8 @@ def mark_topic_status(state_dir: Path, topic_name: str, status: str) -> None:
         raise RuntimeError("No active run")
     for t in run["topics"]:
         if t["topic"] == topic_name:
+            if t.get("status") == "superseded":
+                raise ValueError(f"Topic is superseded: {topic_name}")
             t["status"] = status
             break
     else:
@@ -429,6 +431,8 @@ def apply_hop_decision(
         raise RuntimeError("No active run")
     for t in run["topics"]:
         if t["topic"] == topic_name:
+            if t.get("status") == "superseded":
+                raise ValueError(f"Topic is superseded: {topic_name}")
             # Always: record the hop, advance current_hop, persist quality signals
             t["hop_genealogy"].append(hop_data)
             t["current_hop"] += 1
@@ -512,6 +516,8 @@ def mark_superseded(state_dir: Path, topic_name: str, reason: str) -> None:
         raise RuntimeError("No active run")
     for t in run["topics"]:
         if t["topic"] == topic_name:
+            if not any(o is not t and o.get("status") != "superseded" for o in run["topics"]):
+                raise ValueError("cannot supersede the last live topic")
             t["status"] = "superseded"
             break
     else:
@@ -789,6 +795,7 @@ def build_case_record(final: dict, inputs: dict) -> dict:
     it, and dropping it silently turns the score/demotion loop into a no-op.
     """
     topics = final.get("topics", [])
+    live = [t for t in topics if t.get("status") != "superseded"]
     return {
         "case_id": final["run_id"],
         "version": 1,
@@ -799,9 +806,10 @@ def build_case_record(final: dict, inputs: dict) -> dict:
         "hops_executed": sum(len(t.get("hop_genealogy", [])) for t in topics),
         "confidence_per_topic": {
             t["topic"]: (t["confidence_history"][-1] if t.get("confidence_history") else None)
-            for t in topics
+            for t in live
         },
-        "contradiction_rate": max((t.get("contradiction_rate", 0.0) for t in topics), default=0.0),
+        "contradiction_rate": max((t.get("contradiction_rate", 0.0) for t in live), default=0.0),
+        "superseded": final.get("superseded", {}),
         "patterns_that_worked": _pattern_dict(inputs.get("patterns_that_worked")),
         "patterns_that_failed": _pattern_dict(inputs.get("patterns_that_failed")),
         "applied_patterns": final.get("applied_patterns", []),

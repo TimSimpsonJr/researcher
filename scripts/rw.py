@@ -348,10 +348,15 @@ def _confidence_sources(data) -> list[dict]:
     """
     if isinstance(data, list):
         return data
+    if "fetched" not in data:
+        raise ValueError("sources file must be a list or a fetch_results object with 'fetched'")
     selected = {
-        s["url"]: s for s in data.get("search_context", {}).get("selected_urls", [])
+        s["url"]: s for s in (data.get("search_context") or {}).get("selected_urls", [])
         if isinstance(s, dict) and "url" in s
     }
+    if data["fetched"] and not selected:
+        print("warning: fetch_results has no search_context.selected_urls; "
+              "sources are scored without tier/primary signals", file=sys.stderr)
     sources = []
     for entry in data.get("fetched", []):
         if entry.get("usable") is False:
@@ -363,7 +368,11 @@ def _confidence_sources(data) -> list[dict]:
 
 
 def cmd_compute_confidence(args):
-    _out(compute_confidence(_confidence_sources(_read_json(args.sources_file)), depth=args.depth))
+    files = args.sources_file
+    sources = [s for path in files for s in _confidence_sources(_read_json(path))]
+    if len(files) > 1:  # multi-hop: one source per URL, later file wins
+        sources = list({s.get("url", id(s)): s for s in sources}.values())
+    _out(compute_confidence(sources, depth=args.depth))
 
 
 # --- quality gate, aggregation, write -----------------------------------------
@@ -592,7 +601,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--decision", choices=["continue", "stop", "early_terminated", "replan"],
                    help="override the planner decision (early_terminated)")
     p = add("compute-confidence", cmd_compute_confidence, "confidence score for a sources list or fetch_results JSON file")
-    p.add_argument("--sources-file", required=True)
+    p.add_argument("--sources-file", required=True, action="append",
+                   help="repeatable; with several files sources are merged by URL, later file wins")
     p.add_argument("--depth", required=True, choices=["quick", "standard", "deep", "exhaustive"])
     add("quality-gate", cmd_quality_gate, "Stage 5a per-topic pass/fail and worst confidence")
     p = add("mark-superseded", cmd_mark_superseded, "retire a topic; the quality gate skips it")

@@ -48,6 +48,8 @@ In batch mode skip this step: the workflow computes confidence itself and `sourc
 uv run --frozen --project "{repo}" "{repo}/scripts/rw.py" compute-confidence --sources-file "{sources_so_far}" --depth {depth}
 ```
 
+When `sources_so_far` lists several `fetch_results_hop{N}.json` files, repeat `--sources-file "<path>"` once per file in that same command; sources are merged by URL.
+
 Record the resulting score.
 
 ---

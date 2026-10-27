@@ -750,13 +750,78 @@ def test_mark_superseded_takes_topic_out_of_the_gate(active_run, cli):
     assert [t["topic"] for t in gate["topics"]] == ["Flock Safety contracts"]
     assert gate["worst_confidence"] == 0.95
     run = _run_file(active_run)
-    assert run["topics"][0]["status"] == "superseded"
+    assert {t["topic"]: t["status"] for t in run["topics"]}["Greenville ALPR"] == "superseded"
     assert run["superseded"] == {"Greenville ALPR": "merged into Flock topic"}
 
 
 def test_mark_superseded_unknown_topic_fails(active_run, cli):
     code, _, err = cli("mark-superseded", "--topic", "Nope", "--reason", "x")
     assert code == 1 and "Topic not found" in err
+
+
+def test_mark_superseded_refuses_last_live_topic(active_run, cli):
+    assert cli("mark-superseded", "--topic", "Greenville ALPR", "--reason", "x")[0] == 0
+    code, _, err = cli("mark-superseded", "--topic", "Flock Safety contracts", "--reason", "y")
+    assert code == 1 and "cannot supersede the last live topic" in err
+
+
+def test_apply_hop_decision_refuses_superseded_topic(active_run, cli):
+    cli("mark-superseded", "--topic", "Greenville ALPR", "--reason", "x")
+    resp = _write(active_run / "resp.json", {"decision": "stop", "confidence_score": 0.9, "contradiction_rate": 0.1})
+    hop = _write(active_run / "hop.json", {"hop": 1})
+    code, _, err = cli("apply-hop-decision", "--topic", "Greenville ALPR", "--response-file", resp,
+                       "--hop-data-file", hop)
+    assert code == 1 and "superseded" in err
+
+
+def test_build_case_record_ignores_superseded_topics():
+    from state import build_case_record
+    from score_updates import compute_run_outcome
+    topics = [
+        {"topic": "old", "depth": "quick", "status": "superseded", "confidence_history": [0.1],
+         "contradiction_rate": 0.9, "hop_genealogy": [{}]},
+        {"topic": "new", "depth": "quick", "status": "complete", "confidence_history": [0.9],
+         "contradiction_rate": 0.1, "hop_genealogy": [{}, {}]},
+    ]
+    case = build_case_record({"run_id": "r", "topics": topics, "superseded": {"old": "merged"}},
+                             {"query": "q"})
+    assert case["confidence_per_topic"] == {"new": 0.9}
+    assert case["contradiction_rate"] == 0.1
+    assert case["hops_executed"] == 3 and case["depths_used"]["quick"] == 2
+    assert case["superseded"] == {"old": "merged"}
+    assert compute_run_outcome(case) == "W"
+
+
+def test_compute_confidence_dict_without_fetched_fails(tmp_path, cli, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    code, _, err = cli("compute-confidence", "--sources-file", _write(tmp_path / "x.json", {"a": 1}),
+                       "--depth", "quick")
+    assert code == 1 and "fetched" in err
+
+
+def test_compute_confidence_warns_without_selected_urls(tmp_path, cli, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data = {"fetched": [{"url": "a", "content": "x"}]}
+    code, _, err = cli("compute-confidence", "--sources-file", _write(tmp_path / "x.json", data),
+                       "--depth", "quick")
+    assert code == 0 and "without tier/primary signals" in err
+    data["search_context"] = None
+    code, _, err = cli("compute-confidence", "--sources-file", _write(tmp_path / "y.json", data),
+                       "--depth", "quick")
+    assert code == 0 and "Traceback" not in err
+
+
+def test_compute_confidence_merges_multiple_files(tmp_path, cli, monkeypatch):
+    from confidence import compute_confidence
+    sel = [{"url": "a", "tier": "T1", "is_primary": True}, {"url": "b", "tier": "T2"}]
+    h1 = {"search_context": {"selected_urls": sel},
+          "fetched": [{"url": "a", "content": "1"}, {"url": "b", "content": "1"}]}
+    h2 = {"search_context": {"selected_urls": sel}, "fetched": [{"url": "a", "content": "2"}]}
+    monkeypatch.chdir(tmp_path)
+    code, out, _ = cli("compute-confidence", "--sources-file", _write(tmp_path / "h1.json", h1),
+                       "--sources-file", _write(tmp_path / "h2.json", h2), "--depth", "quick")
+    expected = compute_confidence([{"tier": "T1", "is_primary": True}, {"tier": "T2"}], depth="quick")
+    assert code == 0 and out == pytest.approx(expected)
 
 
 def test_topic_passes_skips_superseded():
