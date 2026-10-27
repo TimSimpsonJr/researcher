@@ -404,6 +404,9 @@ def add_browser_fetch(results_path: Path, url: str, title: str, content: str, ca
     write is deliberately not best-effort (unlike _store): the page was read by
     hand, so a failed write must surface rather than lose it silently.
     """
+    verdict = classify(None, "", content)
+    if verdict.kind == "blocked":  # a hand-read page can itself be a wall
+        raise ValueError(f"content looks like a block page ({verdict.reason})")
     data = json.loads(results_path.read_text(encoding="utf-8"))
     entry = {
         "url": url,

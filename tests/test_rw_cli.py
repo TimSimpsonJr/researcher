@@ -515,6 +515,31 @@ def test_add_browser_fetch_empty_content_file_changes_nothing(active_run, cli, t
     _unchanged_after(active_run, cli, tmp_path, page, "content file is empty")
 
 
+def test_add_browser_fetch_rejects_a_block_page(active_run, cli, tmp_path, no_dns):
+    wall = Path(__file__).parent / "fixtures" / "pages" / "cloudflare_jina.md"
+    page = active_run / "wall.md"
+    page.write_text(wall.read_text(encoding="utf-8"), encoding="utf-8")
+    _unchanged_after(active_run, cli, tmp_path, page, "content looks like a block page (cloudflare)")
+
+
+def test_add_browser_fetch_cache_failure_leaves_seen_urls_alone(active_run, cli, tmp_path, no_dns, monkeypatch):
+    import fetch_and_clean
+    results = _needs_browser_results(active_run)
+    before = results.read_text(encoding="utf-8")
+    page = active_run / "page.md"
+    page.write_text("Board package text. " * 30, encoding="utf-8")
+
+    def deny(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(fetch_and_clean, "save_cache", deny)
+    code, _, err = cli("add-browser-fetch", "--hop", "1", "--topic", "Greenville ALPR", "--url", PDF_URL,
+                       "--content-file", page, "--cache-dir", tmp_path / "cache")
+    assert code == 1 and "disk full" in err
+    assert results.read_text(encoding="utf-8") == before
+    assert _run_file(active_run)["topics"][0]["seen_urls"] == []
+
+
 def test_add_browser_fetch_truncates_output_but_caches_full_text(active_run, cli, tmp_path, no_dns):
     import fetch_and_clean
     results = _needs_browser_results(active_run)

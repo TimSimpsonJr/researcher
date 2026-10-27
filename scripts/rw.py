@@ -313,8 +313,13 @@ def cmd_add_browser_fetch(args):
     content = Path(args.content_file).read_text(encoding="utf-8")  # before any state write
     if not content.strip():
         raise CLIError("content file is empty")
-    add_seen_urls(sd, topic_name=args.topic, urls=[args.url])  # validates the topic first
+    run = load_run(sd)  # validate the topic without writing, so a failed cache write leaves no trace
+    if run is None:
+        raise RuntimeError("No active run")
+    if not any(t["topic"] == args.topic for t in run["topics"]):
+        raise KeyError(f"Topic not found: {args.topic}")
     record = fetch_and_clean.add_browser_fetch(results, args.url, args.title, content, Path(args.cache_dir or fetch_and_clean.DEFAULT_CACHE_DIR))
+    add_seen_urls(sd, topic_name=args.topic, urls=[args.url])
     _out({"url": args.url, "hop": args.hop, "word_count": record["word_count"]})
 
 
